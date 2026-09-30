@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Q-Apnea | Hybrid Quantum-Classical Sleep Apnea Diagnostics</title>
+  <meta name="description" content="Next-Generation Hybrid Quantum Machine Learning & Explainable AI platform for real-time Sleep Apnea detection using ECG HRV, 4D Autoencoder and 4-Qubit QSVM." />
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+
+  <!-- Chart.js for High-Performance Canvas Visualizations -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚛️</text></svg>" />
+  
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="dark-theme">
+  <!-- Background Animated Gradients & Mesh Glow -->
+  <div class="quantum-bg-grid"></div>
+  <div class="ambient-glow glow-cyan"></div>
+  <div class="ambient-glow glow-purple"></div>
+
+  <!-- Header / Navigation Bar -->
+  <header class="app-header">
+    <div class="header-container">
+      <div class="brand-section">
+        <div class="quantum-logo-badge">
+          <i class="fa-solid fa-atom quantum-spin-icon"></i>
+        </div>
+        <div class="brand-text">
+          <div class="brand-title-wrap">
+            <h1 class="brand-title">Q-APNEA <span class="quantum-tag">v2.6 QUANTUM</span></h1>
+          </div>
+          <p class="brand-subtitle">Hybrid Quantum-Classical Sleep Diagnostics & Explainability</p>
+        </div>
+      </div>
+
+      <nav class="nav-tabs" id="navTabs">
+        <button class="nav-tab active" data-tab="tab-studio" id="navStudioBtn">
+          <i class="fa-solid fa-flask-vial"></i> <span>Live Studio</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-benchmarks" id="navBenchmarksBtn">
+          <i class="fa-solid fa-chart-line"></i> <span>Model Benchmarks</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-calibration" id="navCalibrationBtn">
+          <i class="fa-solid fa-sliders"></i> <span>Threshold & Calibration</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-hypnogram" id="navHypnogramBtn">
+          <i class="fa-solid fa-bed-pulse"></i> <span>Patient Hypnogram</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-quantum" id="navQuantumBtn">
+          <i class="fa-solid fa-microchip"></i> <span>Quantum Circuit</span>
+        </button>
+      </nav>
+
+      <div class="header-actions">
+        <div class="status-indicator online" id="systemStatusPill" title="Qiskit Aer Quantum Simulator Active">
+          <span class="status-dot"></span>
+          <span class="status-label">Engine Ready</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Real-time Key Telemetry Ribbon -->
+  <section class="telemetry-bar">
+    <div class="telemetry-container">
+      <div class="telemetry-item">
+        <span class="telemetry-label"><i class="fa-solid fa-award"></i> QSVM ROC-AUC</span>
+        <span class="telemetry-val highlight-cyan">0.9999</span>
+      </div>
+      <div class="telemetry-divider"></div>
+      <div class="telemetry-item">
+        <span class="telemetry-label"><i class="fa-solid fa-bullseye"></i> Test Sensitivity</span>
+        <span class="telemetry-val highlight-green">100.0%</span>
+      </div>
+      <div class="telemetry-divider"></div>
+      <div class="telemetry-item">
+        <span class="telemetry-label"><i class="fa-solid fa-shield-halved"></i> Test Specificity</span>
+        <span class="telemetry-val highlight-green">99.81%</span>
+      </div>
+      <div class="telemetry-divider"></div>
+      <div class="telemetry-item">
+        <span class="telemetry-label"><i class="fa-solid fa-compress"></i> Latent Space</span>
+        <span class="telemetry-val highlight-purple">10D → 4D → 4 Qubits</span>
+      </div>
+      <div class="telemetry-divider"></div>
+      <div class="telemetry-item">
+        <span class="telemetry-label"><i class="fa-solid fa-scale-balanced"></i> Optimal Youden J</span>
+        <span class="telemetry-val highlight-amber">-0.6130</span>
+      </div>
+      <div class="telemetry-divider"></div>
+      <div class="telemetry-item">
+        <span class="telemetry-label"><i class="fa-solid fa-check-double"></i> Calibration ECE</span>
+        <span class="telemetry-val highlight-cyan">0.0022</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Main Multi-Tab Viewport -->
+  <main class="main-content">
+
+    <!-- ======================================================== -->
+    <!-- TAB 1: LIVE QUANTUM DIAGNOSTIC STUDIO                    -->
+    <!-- ======================================================== -->
+    <div class="tab-pane active" id="tab-studio">
+      <div class="studio-layout">
+        
+        <!-- Left Panel: 10 Feature Controls & Presets -->
+        <div class="studio-panel-left glass-card">
+          <div class="panel-header">
+            <div class="panel-title-wrap">
+              <i class="fa-solid fa-heart-pulse icon-cyan"></i>
+              <h2>Physiological HRV Inputs</h2>
+            </div>
+            <span class="feature-count-badge">10 Selected Features</span>
+          </div>
+          <p class="panel-desc">Modify 60-second window ECG Heart Rate and HRV parameters or select a clinical preset to simulate real-time patient states.</p>
+
+          <!-- Clinical Presets Toolbar -->
+          <div class="presets-toolbar">
+            <span class="preset-label"><i class="fa-solid fa-wand-magic-sparkles"></i> Presets:</span>
+            <div class="preset-chips" id="presetChipsContainer">
+              <!-- Dynamically populated -->
+              <button class="preset-chip active" data-preset="preset_normal_sleep">Healthy Normal</button>
+              <button class="preset-chip" data-preset="preset_severe_apnea">Severe OSA Event</button>
+              <button class="preset-chip" data-preset="preset_mild_hypopnea">Mild Hypopnea</button>
+              <button class="preset-chip" data-preset="preset_tachycardic_arousal">Post-Apnea Arousal</button>
+              <button class="preset-chip" data-preset="preset_deep_restorative">Deep SWS</button>
+            </div>
+          </div>
+
+          <!-- Feature Sliders List -->
+          <div class="feature-sliders-grid" id="featureSlidersContainer">
+            <!-- Populated via JS -->
+          </div>
+
+          <div class="studio-actions-bar">
+            <button class="btn btn-primary" id="runInferenceBtn">
+              <i class="fa-solid fa-bolt"></i> Execute Quantum Inference
+            </button>
+            <button class="btn btn-secondary" id="resetInputsBtn">
+              <i class="fa-solid fa-rotate-left"></i> Reset Defaults
+            </button>
+          </div>
+        </div>
+
+        <!-- Right Panel: Real-Time Verdict, 4-Stage Flow & Quantum Visualizer -->
+        <div class="studio-panel-right">
+          
+          <!-- Live Verdict Hero Card -->
+          <div class="verdict-hero-card glass-card" id="verdictCard">
+            <div class="verdict-main">
+              <div class="verdict-gauge-wrap">
+                <div class="circular-progress" id="circularGauge">
+                  <div class="gauge-inner">
+                    <span class="gauge-value" id="gaugeProbVal">--%</span>
+                    <span class="gauge-sub">Apnea Risk</span>
+                  </div>
+                </div>
+              </div>
+              <div class="verdict-details">
+                <div class="verdict-badge-row">
+                  <span class="badge badge-normal" id="verdictBadge">ANALYZING...</span>
+                  <span class="badge badge-outline" id="decisionThresholdBadge">Threshold: -0.6130</span>
+                </div>
+                <h3 class="verdict-title" id="verdictTitle">Awaiting Input...</h3>
+                <p class="verdict-summary" id="verdictSummary">Adjust parameters or pick a preset on the left to trigger the end-to-end Quantum Pipeline.</p>
+                <div class="verdict-metrics-row">
+                  <div class="mini-metric">
+                    <span class="mini-metric-label">Raw Decision Score $f(x)$</span>
+                    <span class="mini-metric-val font-mono" id="verdictRawScore">--</span>
+                  </div>
+                  <div class="mini-metric">
+                    <span class="mini-metric-label">Platt Calibrated Prob</span>
+                    <span class="mini-metric-val font-mono" id="verdictCalibratedProb">--</span>
+                  </div>
+                  <div class="mini-metric">
+                    <span class="mini-metric-label">Youden Classification</span>
+                    <span class="mini-metric-val" id="verdictClassification">--</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4-Stage Hybrid Pipeline Visualizer -->
+          <div class="pipeline-flow-card glass-card">
+            <div class="flow-header">
+              <h3><i class="fa-solid fa-diagram-project icon-purple"></i> 4-Stage Hybrid Quantum Inference Flow</h3>
+              <span class="step-indicator">Real-time Stream</span>
+            </div>
+            
+            <div class="flow-stages-row">
+              <!-- Stage 1 -->
+              <div class="flow-stage-box" id="flowStage1">
+                <div class="stage-num">01</div>
+                <div class="stage-body">
+                  <h4>Standardized 10D</h4>
+                  <p class="stage-sub">Train-fitted Z-Score</p>
+                  <div class="stage-data-preview" id="stage1Preview">10 Features</div>
+                </div>
+              </div>
+              <div class="flow-arrow"><i class="fa-solid fa-angle-right"></i></div>
+
+              <!-- Stage 2 -->
+              <div class="flow-stage-box" id="flowStage2">
+                <div class="stage-num">02</div>
+                <div class="stage-body">
+                  <h4>Autoencoder 4D</h4>
+                  <p class="stage-sub">Non-linear Latent [z₀..z₃]</p>
+                  <div class="stage-data-preview font-mono" id="stage2Preview">[-, -, -, -]</div>
+                </div>
+              </div>
+              <div class="flow-arrow"><i class="fa-solid fa-angle-right"></i></div>
+
+              <!-- Stage 3 -->
+              <div class="flow-stage-box" id="flowStage3">
+                <div class="stage-num">03</div>
+                <div class="stage-body">
+                  <h4>Quantum Angles</h4>
+                  <p class="stage-sub">Scaled to [0, π] rad</p>
+                  <div class="stage-data-preview font-mono" id="stage3Preview">[θ₀, θ₁, θ₂, θ₃]</div>
+                </div>
+              </div>
+              <div class="flow-arrow"><i class="fa-solid fa-angle-right"></i></div>
+
+              <!-- Stage 4 -->
+              <div class="flow-stage-box" id="flowStage4">
+                <div class="stage-num">04</div>
+                <div class="stage-body">
+                  <h4>Quantum Kernel</h4>
+                  <p class="stage-sub">Fidelity with 1,000 States</p>
+                  <div class="stage-data-preview font-mono highlight-cyan" id="stage4Preview">K(x, X_train)</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom Grid: Quantum State Amplitudes + Live Explainability -->
+          <div class="studio-bottom-grid">
+            
+            <!-- 4-Qubit Statevector Amplitudes Chart -->
+            <div class="quantum-states-card glass-card">
+              <div class="card-header-flex">
+                <h3><i class="fa-solid fa-atom icon-cyan"></i> 4-Qubit Quantum Statevector $|\Phi(x)\rangle$</h3>
+                <span class="badge-soft">16 Hilbert Basis States</span>
+              </div>
+              <p class="card-sub">Simulated quantum probabilities across the $2^4 = 16$ computational basis states $|0000\rangle \dots |1111\rangle$.</p>
+              <div class="chart-canvas-wrap" style="height: 220px;">
+                <canvas id="quantumStateChart"></canvas>
+              </div>
+            </div>
+
+            <!-- Perturbation-Based Explainability (Local Feature Sensitivity) -->
+            <div class="explainability-card glass-card">
+              <div class="card-header-flex">
+                <h3><i class="fa-solid fa-magnifying-glass-chart icon-green"></i> Live Feature Sensitivity (Explainability)</h3>
+                <span class="badge-soft">+10% Scale Perturbation</span>
+              </div>
+              <p class="card-sub">Measures the change in decision score $\Delta f(x)$ when perturbing each HRV feature by $+10\%$ standard deviation.</p>
+              <div class="chart-canvas-wrap" style="height: 220px;">
+                <canvas id="perturbationChart"></canvas>
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ======================================================== -->
+    <!-- TAB 2: MODEL BENCHMARK & VALIDATION SUITE                -->
+    <!-- ======================================================== -->
+    <div class="tab-pane" id="tab-benchmarks">
+      <div class="benchmarks-container">
+        
+        <div class="section-title-wrap">
+          <h2><i class="fa-solid fa-trophy icon-cyan"></i> Validated Model Architecture Benchmark Suite</h2>
+          <p>Comprehensive performance metrics evaluated strictly on the hold-out test set (2,880 1-minute samples across untouched test records).</p>
+        </div>
+
+        <!-- Leaderboard Table Card -->
+        <div class="benchmark-table-card glass-card">
+          <div class="table-responsive">
+            <table class="benchmark-table" id="benchmarkTable">
+              <thead>
+                <tr>
+                  <th>Rank & Model</th>
+                  <th>Feature Representation</th>
+                  <th>Split</th>
+                  <th>ROC-AUC</th>
+                  <th>PR-AUC</th>
+                  <th>Accuracy</th>
+                  <th>Sensitivity (Recall)</th>
+                  <th>Specificity</th>
+                  <th>F1-Score</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="benchmarkTableBody">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Charts Row: ROC Curves, PR Curves, Confusion Matrices -->
+        <div class="charts-2col-grid">
+          
+          <div class="chart-card glass-card">
+            <div class="card-header-flex">
+              <h3><i class="fa-solid fa-chart-area icon-cyan"></i> Receiver Operating Characteristic (ROC)</h3>
+              <span class="badge-soft">QSVM AUC = 0.9999</span>
+            </div>
+            <div class="chart-canvas-wrap" style="height: 320px;">
+              <canvas id="benchmarkRocChart"></canvas>
+            </div>
+          </div>
+
+          <div class="chart-card glass-card">
+            <div class="card-header-flex">
+              <h3><i class="fa-solid fa-chart-line icon-purple"></i> Precision-Recall Curve</h3>
+              <span class="badge-soft">PR-AUC = 0.9999</span>
+            </div>
+            <div class="chart-canvas-wrap" style="height: 320px;">
+              <canvas id="benchmarkPrChart"></canvas>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Confusion Matrix Explorer -->
+        <div class="confusion-matrix-section glass-card">
+          <div class="card-header-flex">
+            <h3><i class="fa-solid fa-table-cells-large icon-green"></i> Test Confusion Matrix Matrix Comparison</h3>
+            <div class="cm-toggles">
+              <button class="btn-toggle active" id="cmShowCountsBtn">Sample Counts</button>
+              <button class="btn-toggle" id="cmShowPercentsBtn">Percentages</button>
+            </div>
+          </div>
+          
+          <div class="cm-cards-grid" id="cmCardsContainer">
+            <!-- Populated via JS for QSVM, 10D SVM, PCA SVM, AE SVM -->
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ======================================================== -->
+    <!-- TAB 3: THRESHOLD TUNING & CALIBRATION LABORATORY         -->
+    <!-- ======================================================== -->
+    <div class="tab-pane" id="tab-calibration">
+      <div class="calibration-container">
+        
+        <div class="section-title-wrap">
+          <h2><i class="fa-solid fa-sliders icon-amber"></i> Validation Decision Threshold & Calibration Lab</h2>
+          <p>Explore clinical operating points, sensitivity-specificity trade-offs, and Platt sigmoid probability reliability.</p>
+        </div>
+
+        <!-- Interactive Threshold Sandbox Card -->
+        <div class="threshold-sandbox-card glass-card">
+          <div class="sandbox-header">
+            <div class="sandbox-title">
+              <i class="fa-solid fa-crosshairs icon-cyan"></i>
+              <h3>Interactive Decision Threshold Sandbox</h3>
+            </div>
+            <div class="preset-thresholds">
+              <button class="btn-preset-th active" id="btnYoudenTh">
+                <i class="fa-solid fa-star"></i> Youden's J Optimal (-0.6130)
+              </button>
+              <button class="btn-preset-th" id="btnF1Th">
+                <i class="fa-solid fa-bullseye"></i> F1-Optimal (-0.6130)
+              </button>
+              <button class="btn-preset-th" id="btnDefaultTh">
+                <i class="fa-solid fa-anchor"></i> Default SVM Zero (0.0000)
+              </button>
+            </div>
+          </div>
+
+          <div class="slider-control-box">
+            <div class="slider-label-row">
+              <span class="slider-name">Active Decision Threshold $\tau$:</span>
+              <span class="slider-val-display font-mono" id="currentThresholdDisplay">-0.6130</span>
+            </div>
+            <input type="range" class="custom-range" id="thresholdSweepSlider" min="-2.0" max="2.0" step="0.01" value="-0.613" />
+            <div class="slider-ticks-row">
+              <span>-2.0 (High Sensitivity)</span>
+              <span>-0.613 (Youden Optimal)</span>
+              <span>0.0 (Default Margin)</span>
+              <span>+2.0 (High Specificity)</span>
+            </div>
+          </div>
+
+          <!-- Dynamic Result Cards corresponding to selected threshold -->
+          <div class="th-metrics-grid">
+            <div class="th-metric-box">
+              <span class="th-metric-label">Estimated Sensitivity</span>
+              <span class="th-metric-val text-green" id="thDynSensitivity">100.0%</span>
+              <span class="th-metric-sub">True Positive Rate</span>
+            </div>
+            <div class="th-metric-box">
+              <span class="th-metric-label">Estimated Specificity</span>
+              <span class="th-metric-val text-cyan" id="thDynSpecificity">99.1%</span>
+              <span class="th-metric-sub">True Negative Rate</span>
+            </div>
+            <div class="th-metric-box">
+              <span class="th-metric-label">Estimated Precision (PPV)</span>
+              <span class="th-metric-val text-purple" id="thDynPrecision">97.6%</span>
+              <span class="th-metric-sub">Positive Predictive Value</span>
+            </div>
+            <div class="th-metric-box">
+              <span class="th-metric-label">F1-Score</span>
+              <span class="th-metric-val text-amber" id="thDynF1">0.988</span>
+              <span class="th-metric-sub">Harmonic Mean</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Threshold Sweep Curves & Calibration Diagram -->
+        <div class="charts-2col-grid">
+          
+          <div class="chart-card glass-card">
+            <div class="card-header-flex">
+              <h3><i class="fa-solid fa-chart-line icon-cyan"></i> Validation Threshold Sweep Analysis</h3>
+              <span class="badge-soft">Sensitivity vs Specificity vs F1</span>
+            </div>
+            <div class="chart-canvas-wrap" style="height: 320px;">
+              <canvas id="thresholdSweepChart"></canvas>
+            </div>
+          </div>
+
+          <div class="chart-card glass-card">
+            <div class="card-header-flex">
+              <h3><i class="fa-solid fa-scale-balanced icon-green"></i> Platt Sigmoid Reliability Diagram</h3>
+              <span class="badge-soft">ECE = 0.0022 | Brier = 0.0016</span>
+            </div>
+            <div class="chart-canvas-wrap" style="height: 320px;">
+              <canvas id="calibrationReliabilityChart"></canvas>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ======================================================== -->
+    <!-- TAB 4: CLINICAL OVERNIGHT HYPNOGRAM & AHI EXPLORER       -->
+    <!-- ======================================================== -->
+    <div class="tab-pane" id="tab-hypnogram">
+      <div class="hypnogram-container">
+        
+        <div class="section-title-wrap">
+          <h2><i class="fa-solid fa-bed-pulse icon-cyan"></i> Overnight Sleep Apnea Hypnogram & AHI Explorer</h2>
+          <p>Continuous minute-by-minute sleep apnea monitoring, Apnea-Hypopnea Index (AHI) calculation, and clinical severity staging.</p>
+        </div>
+
+        <!-- Patient Selection & File Upload Toolbar -->
+        <div class="patient-toolbar glass-card">
+          <div class="patient-picker">
+            <label><i class="fa-solid fa-user-doctor"></i> Select Patient Record:</label>
+            <select class="custom-select" id="patientRecordSelect">
+              <option value="a01">Patient A01 (Severe Sleep Apnea — High AHI)</option>
+              <option value="a02">Patient A02 (Severe Sleep Apnea — Severe Desaturation)</option>
+              <option value="b01">Patient B01 (Moderate Sleep Apnea — Borderline)</option>
+              <option value="c01">Patient C01 (Control Subject — Normal Healthy Sleep)</option>
+            </select>
+          </div>
+
+          <div class="patient-picker">
+            <label><i class="fa-solid fa-clock"></i> Duration:</label>
+            <select class="custom-select" id="patientDurationSelect">
+              <option value="60">1 Hour (60 minutes)</option>
+              <option value="120" selected>2 Hours (120 minutes)</option>
+              <option value="240">4 Hours (240 minutes)</option>
+            </select>
+          </div>
+
+          <div class="toolbar-actions">
+            <button class="btn btn-primary" id="loadPatientBtn">
+              <i class="fa-solid fa-play"></i> Run Overnight Analysis
+            </button>
+            <label class="btn btn-outline" for="csvFileInput">
+              <i class="fa-solid fa-file-csv"></i> Upload CSV Record
+              <input type="file" id="csvFileInput" accept=".csv" style="display: none;" />
+            </label>
+          </div>
+        </div>
+
+        <!-- Clinical AHI Diagnostic Summary Card -->
+        <div class="ahi-summary-card glass-card" id="ahiSummaryCard">
+          <div class="ahi-score-box">
+            <span class="ahi-title">Apnea-Hypopnea Index (AHI)</span>
+            <span class="ahi-val" id="ahiScoreVal">38.4</span>
+            <span class="ahi-unit">events / hour</span>
+            <div class="ahi-badge badge-danger" id="ahiSeverityBadge">SEVERE SLEEP APNEA</div>
+          </div>
+
+          <div class="ahi-stats-grid">
+            <div class="ahi-stat-item">
+              <span class="ahi-stat-label">Total Monitoring Time</span>
+              <span class="ahi-stat-val" id="totalTimeVal">120 mins (2.0 hrs)</span>
+            </div>
+            <div class="ahi-stat-item">
+              <span class="ahi-stat-label">Apneic Epochs</span>
+              <span class="ahi-stat-val text-danger" id="apneaMinutesVal">77 mins (64.2%)</span>
+            </div>
+            <div class="ahi-stat-item">
+              <span class="ahi-stat-label">Longest Continuous Episode</span>
+              <span class="ahi-stat-val text-amber" id="maxConsecutiveVal">16 consecutive mins</span>
+            </div>
+            <div class="ahi-stat-item">
+              <span class="ahi-stat-label">Mean HR (Apnea vs Normal)</span>
+              <span class="ahi-stat-val font-mono" id="meanHrSplitVal">86.2 bpm vs 63.8 bpm</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hypnogram Timeline Chart -->
+        <div class="hypnogram-chart-card glass-card">
+          <div class="card-header-flex">
+            <h3><i class="fa-solid fa-wave-square icon-cyan"></i> Minute-by-Minute Apnea Risk & Heart Rate Timeline</h3>
+            <div class="legend-row">
+              <span class="legend-item"><span class="legend-box box-apnea"></span> Apnea Episode (Risk &ge; 50%)</span>
+              <span class="legend-item"><span class="legend-box box-normal"></span> Normal Sleep</span>
+              <span class="legend-item"><span class="legend-box box-hr"></span> Heart Rate (bpm)</span>
+            </div>
+          </div>
+          <div class="chart-canvas-wrap" style="height: 340px;">
+            <canvas id="hypnogramTimelineChart"></canvas>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ======================================================== -->
+    <!-- TAB 5: QUANTUM ARCHITECTURE & MATHEMATICAL DEEP-DIVE     -->
+    <!-- ======================================================== -->
+    <div class="tab-pane" id="tab-quantum">
+      <div class="quantum-deep-container">
+        
+        <div class="section-title-wrap">
+          <h2><i class="fa-solid fa-microchip icon-purple"></i> Quantum Circuit Architecture & Mathematical Foundations</h2>
+          <p>Detailed formulation of the 4-Qubit Second-Order Pauli-Z Kernel, Fidelity Inner Product, and Latent Compression.</p>
+        </div>
+
+        <!-- Interactive Quantum Circuit Architecture Card -->
+        <div class="circuit-spec-card glass-card">
+          <div class="card-header-flex">
+            <h3><i class="fa-solid fa-network-wired icon-cyan"></i> 4-Qubit ZZFeatureMap Circuit Topology</h3>
+            <span class="badge-soft">Depth = 2 Repetitions | Full Entanglement</span>
+          </div>
+
+          <div class="circuit-ascii-box">
+            <pre class="font-mono circuit-code">
+q_0: ──[H]──[Rz(2θ₀)]──■──────────────────────────────■──────[H]──[Rz(2θ₀)]── ... ──■──────────────────────────────■──
+                       │                              │                              │                              │
+q_1: ──[H]──[Rz(2θ₁)]──■─────────■────────────────────┼──────[H]──[Rz(2θ₁)]── ... ──■─────────■────────────────────┼──
+                                 │                    │                                       │                    │
+q_2: ──[H]──[Rz(2θ₂)]────────────■─────────■──────────┼──────[H]──[Rz(2θ₂)]── ... ────────────■─────────■──────────┼──
+                                           │          │                                                 │          │
+q_3: ──[H]──[Rz(2θ₃)]──────────────────────■──────────■──────[H]──[Rz(2θ₃)]── ... ─────────────────────■──────────■──
+            </pre>
+          </div>
+
+          <div class="circuit-explanation-grid">
+            <div class="circuit-exp-item">
+              <span class="exp-num">1</span>
+              <div>
+                <strong>Hadamard Initialization:</strong>
+                <p>Applies $H^{\otimes 4}$ to place the initial state $|0000\rangle$ into a uniform superposition $\frac{1}{4} \sum_{k=0}^{15} |k\rangle$.</p>
+              </div>
+            </div>
+
+            <div class="circuit-exp-item">
+              <span class="exp-num">2</span>
+              <div>
+                <strong>Single-Qubit Phase Rotations:</strong>
+                <p>Encodes each scaled latent dimension $\theta_j \in [0, \pi]$ using single-qubit $R_Z(2\theta_j) = \exp(-i \theta_j Z_j)$.</p>
+              </div>
+            </div>
+
+            <div class="circuit-exp-item">
+              <span class="exp-num">3</span>
+              <div>
+                <strong>Two-Qubit ZZ Entanglement:</strong>
+                <p>Applies pairwise cross-feature rotations $R_{ZZ}\left(2(\pi - \theta_j)(\pi - \theta_k)\right)$, capturing complex non-linear autonomic correlations.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Math Cards Grid -->
+        <div class="math-cards-grid">
+          
+          <div class="math-card glass-card">
+            <div class="math-badge">KERNEL OPERATOR</div>
+            <h4>Quantum Fidelity Kernel</h4>
+            <div class="formula-box font-mono">
+              K(x, x') = |⟨Φ(x) | Φ(x')⟩|²
+            </div>
+            <p>Computes the exact Hilbert-space transition probability (state overlap fidelity) between two parameterized quantum statevectors $|\Phi(x)\rangle$ and $|\Phi(x')\rangle$.</p>
+          </div>
+
+          <div class="math-card glass-card">
+            <div class="math-badge">AUTOENCODER</div>
+            <h4>Latent Feature Compression</h4>
+            <div class="formula-box font-mono">
+              z = \text{Encoder}(x) \in \mathbb{R}^4, \quad \theta_i = \pi \cdot \frac{z_i - z_{\min}}{z_{\max} - z_{\min}}
+            </div>
+            <p>Compresses 10 collinear HRV features down to 4 orthogonal non-linear dimensions, mapped into $[0, \pi]$ bounds for optimal quantum phase rotations without $2\pi$ periodic aliasing.</p>
+          </div>
+
+          <div class="math-card glass-card">
+            <div class="math-badge">CALIBRATION</div>
+            <h4>Platt Sigmoid Scaling</h4>
+            <div class="formula-box font-mono">
+              P(y=1 \mid f) = \frac{1}{1 + \exp(A \cdot f(x) + B)}
+            </div>
+            <p>Transforms raw SVM geometric margin decision scores $f(x)$ into well-calibrated posterior probabilities with an Expected Calibration Error of only 0.0022.</p>
+          </div>
+
+          <div class="math-card glass-card">
+            <div class="math-badge">OPTIMIZATION</div>
+            <h4>Validation Youden's J Threshold</h4>
+            <div class="formula-box font-mono">
+              J(\tau) = \text{Sensitivity}(\tau) + \text{Specificity}(\tau) - 1
+            </div>
+            <p>Selects the optimal operating decision threshold $\tau^* = -0.6130$ on the validation set, maximizing the combined clinical sensitivity and specificity without data leakage.</p>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Global Footer -->
+  <footer class="app-footer">
+    <div class="footer-container">
+      <div class="footer-brand">
+        <i class="fa-solid fa-atom quantum-spin-icon"></i>
+        <span>Q-APNEA Research Prototype • SIH 2026</span>
+      </div>
+      <div class="footer-copy">
+        Research prototype — not a clinical diagnostic system • Validated under record-level split • 4-Qubit ZZFeatureMap • Qiskit Aer Engine
+      </div>
+    </div>
+  </footer>
+
+  <!-- Notification Toast -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

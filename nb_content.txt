@@ -1,0 +1,2602 @@
+// ==================== CELL 0 [markdown] ====================
+# Sleep Apnea — Best Combined & Clean Pipeline
+
+This notebook consolidates the strongest parts of the two supplied Sleep Apnea notebooks and removes the stale/duplicated cells that caused `NameError`/`TypeError` risks.
+
+### Included improvements
+- reproducible project setup and package verification
+- robust, resumable dataset download + record integrity checks
+- minute-level HR/HRV feature extraction
+- record-level train/validation/test splitting with `c05` + `c06` kept together
+- TRAIN-ONLY imputation, scaling, correlation/redundancy analysis, and feature selection
+- 4D PCA and 4D autoencoder representations
+- TRAIN-ONLY scaling of the autoencoder latent space
+- classical RBF-SVM baselines plus validation-tuned AE-SVM
+- Qiskit quantum-kernel sanity test
+- quantum-angle scaling to `[0, π]` fitted using TRAIN only
+- record-balanced 1,000-sample QSVM training subset to keep the quantum experiment computationally practical
+- corrected train/validation/test quantum-kernel orientation
+- validation-only QSVM `C` tuning
+- validation-derived decision-threshold analysis (no hard-coded threshold)
+- sigmoid calibration fitted on validation scores and evaluated on the untouched test set
+- single-sample prediction pipeline and perturbation-based explainability
+- saved CSV/model artifacts and a final generated comparison table
+
+**Important:** all result tables are generated at run time; stale hard-coded metrics from the supplied notebooks are not copied into the final results.
+
+// ==================== CELL 1 [code] ====================
+# ============================================================
+# STEP 0 — PROJECT SETUP + REPRODUCIBILITY
+# ============================================================
+
+import os
+import sys
+import random
+import platform
+import shutil
+import subprocess
+from pathlib import Path
+
+SEED = 42
+
+random.seed(SEED)
+
+# Colab-friendly path, with a local fallback.
+if Path("/content").exists():
+    PROJECT_DIR = Path("/content/SIH_2026_Apnea")
+else:
+    PROJECT_DIR = Path.cwd() / "SIH_2026_Apnea"
+
+DATA_DIR = PROJECT_DIR / "data" / "apnea-ecg"
+FEATURE_DIR = PROJECT_DIR / "features"
+MODEL_DIR = PROJECT_DIR / "models"
+RESULT_DIR = PROJECT_DIR / "results"
+
+for folder in [PROJECT_DIR, DATA_DIR, FEATURE_DIR, MODEL_DIR, RESULT_DIR]:
+    folder.mkdir(parents=True, exist_ok=True)
+
+PHYSIONET_BASE_URL = "https://physionet.org/files/apnea-ecg/1.0.0/"
+
+LEARNING_RECORDS = (
+    [f"a{i:02d}" for i in range(1, 21)]
+    + [f"b{i:02d}" for i in range(1, 6)]
+    + [f"c{i:02d}" for i in range(1, 11)]
+)
+
+OFFICIAL_TEST_RECORDS = [f"x{i:02d}" for i in range(1, 36)]
+
+print("=" * 80)
+print("SLEEP APNEA — BEST COMBINED PIPELINE")
+print("=" * 80)
+print("Python:", sys.version.split()[0])
+print("Platform:", platform.platform())
+print("Project:", PROJECT_DIR)
+print("Learning records:", len(LEARNING_RECORDS))
+print("Seed:", SEED)
+
+try:
+    total, used, free = shutil.disk_usage(PROJECT_DIR.anchor or "/")
+    print(f"Disk free: {free / 1024**3:.2f} GB")
+except Exception:
+    pass
+
+// ==================== CELL 2 [code] ====================
+# ============================================================
+# STEP 1 — INSTALL / VERIFY CORE PACKAGES
+# ============================================================
+
+def pip_install(packages):
+    cmd = [sys.executable, "-m", "pip", "install", "-q"] + packages
+    subprocess.check_call(cmd)
+
+pip_install([
+    "wfdb",
+    "scipy",
+    "scikit-learn",
+    "pandas",
+    "matplotlib",
+    "requests",
+    "tqdm",
+    "joblib",
+])
+
+import numpy as np
+import pandas as pd
+import scipy
+import sklearn
+import requests
+import wfdb
+import matplotlib.pyplot as plt
+import joblib
+
+print("=" * 80)
+print("CORE PACKAGE CHECK")
+print("=" * 80)
+print("NumPy       :", np.__version__)
+print("Pandas      :", pd.__version__)
+print("SciPy       :", scipy.__version__)
+print("Scikit-learn:", sklearn.__version__)
+print("WFDB        :", wfdb.__version__)
+print("Requests    :", requests.__version__)
+
+// ==================== CELL 3 [code] ====================
+# ============================================================
+# STEP 2 — INSTALL / VERIFY PYTORCH + QISKIT
+# ============================================================
+
+# PyTorch is normally pre-installed in Colab. Install only if import fails.
+try:
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+except Exception:
+    pip_install(["torch"])
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+# Pin the same working quantum versions used by the supplied notebooks.
+pip_install([
+    "qiskit==2.5.2",
+    "qiskit-machine-learning==0.9.1",
+])
+
+import qiskit
+import qiskit_machine_learning
+
+print("=" * 80)
+print("PYTORCH / QISKIT CHECK")
+print("=" * 80)
+print("PyTorch:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+    print("CUDA:", torch.version.cuda)
+
+print("Qiskit:", qiskit.__version__)
+print("Qiskit ML:", qiskit_machine_learning.__version__)
+
+// ==================== CELL 4 [code] ====================
+# ============================================================
+# STEP 3 — GLOBAL SEEDS / TORCH DETERMINISM
+# ============================================================
+
+np.random.seed(SEED)
+random.seed(SEED)
+torch.manual_seed(SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+print("Reproducibility seeds configured:", SEED)
+
+// ==================== CELL 5 [markdown] ====================
+## Dataset acquisition
+
+The learning set contains the 35 labeled records used by the pipeline. The official challenge test records (`x01`–`x35`) are not used because they do not provide reference labels for this supervised evaluation.
+
+The downloader below skips already-complete files, writes through a temporary `.part` file, retries interrupted downloads, and the next integrity step verifies that the resulting WFDB records can actually be read.
+
+// ==================== CELL 6 [code] ====================
+# ============================================================
+# STEP 4 — ROBUST APNEA-ECG DOWNLOAD
+# ============================================================
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm.auto import tqdm
+import time
+
+REQUIRED_EXTENSIONS = [".dat", ".hea", ".apn", ".qrs"]
+
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Sleep-Apnea-Research-Notebook/1.0"
+})
+
+def download_file(url, destination, retries=3, timeout=(15, 120)):
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    if destination.exists() and destination.stat().st_size > 0:
+        return {"path": str(destination), "status": "already_exists"}
+
+    part_path = Path(str(destination) + ".part")
+
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            with session.get(url, stream=True, timeout=timeout) as response:
+                response.raise_for_status()
+
+                with open(part_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+
+            if part_path.stat().st_size == 0:
+                raise IOError("Downloaded file is empty.")
+
+            part_path.replace(destination)
+
+            return {
+                "path": str(destination),
+                "status": "downloaded",
+                "bytes": destination.stat().st_size
+            }
+
+        except Exception as exc:
+            last_error = exc
+            if part_path.exists():
+                part_path.unlink(missing_ok=True)
+            time.sleep(attempt)
+
+    raise RuntimeError(f"Failed to download {url}: {last_error}")
+
+def download_record(record_name):
+    results = []
+    for ext in REQUIRED_EXTENSIONS:
+        filename = f"{record_name}{ext}"
+        destination = DATA_DIR / filename
+        url = PHYSIONET_BASE_URL + filename
+        results.append(download_file(url, destination))
+    return record_name, results
+
+download_jobs = {}
+for record_name in LEARNING_RECORDS:
+    for ext in REQUIRED_EXTENSIONS:
+        download_jobs[(record_name, ext)] = DATA_DIR / f"{record_name}{ext}"
+
+missing_before = sum(
+    not (path.exists() and path.stat().st_size > 0)
+    for path in download_jobs.values()
+)
+
+print("Missing/non-empty-check failures before download:", missing_before)
+
+with ThreadPoolExecutor(max_workers=6) as executor:
+    futures = {
+        executor.submit(download_record, rec): rec
+        for rec in LEARNING_RECORDS
+    }
+    for future in tqdm(as_completed(futures), total=len(futures), desc="Downloading records"):
+        rec = futures[future]
+        try:
+            future.result()
+        except Exception as exc:
+            print(f"ERROR downloading {rec}: {exc}")
+
+missing_after = sum(
+    not (path.exists() and path.stat().st_size > 0)
+    for path in download_jobs.values()
+)
+
+print("\nMissing/empty files after download:", missing_after)
+
+if missing_after:
+    missing_paths = [
+        str(path) for path in download_jobs.values()
+        if not (path.exists() and path.stat().st_size > 0)
+    ]
+    raise RuntimeError("Some required files are still missing:\n" + "\n".join(missing_paths))
+
+print("Download stage completed.")
+
+// ==================== CELL 7 [code] ====================
+# ============================================================
+# STEP 5 — DATASET FILE + WFDB READABILITY CHECK
+# ============================================================
+
+file_check = []
+readability_check = []
+
+for record_name in LEARNING_RECORDS:
+    row = {"record": record_name}
+
+    for ext in REQUIRED_EXTENSIONS:
+        path = DATA_DIR / f"{record_name}{ext}"
+        row[ext[1:]] = path.exists() and path.stat().st_size > 0
+
+    row["complete"] = all(row[ext[1:]] for ext in REQUIRED_EXTENSIONS)
+    file_check.append(row)
+
+    try:
+        header = wfdb.rdheader(str(DATA_DIR / record_name))
+        apn = wfdb.rdann(str(DATA_DIR / record_name), extension="apn")
+        qrs = wfdb.rdann(str(DATA_DIR / record_name), extension="qrs")
+        readability_check.append({
+            "record": record_name,
+            "fs": header.fs,
+            "n_samples": header.sig_len,
+            "n_apnea_annotations": len(apn.sample),
+            "n_qrs_annotations": len(qrs.sample),
+            "readable": True,
+            "error": ""
+        })
+    except Exception as exc:
+        readability_check.append({
+            "record": record_name,
+            "fs": np.nan,
+            "n_samples": np.nan,
+            "n_apnea_annotations": np.nan,
+            "n_qrs_annotations": np.nan,
+            "readable": False,
+            "error": str(exc)
+        })
+
+file_check_df = pd.DataFrame(file_check)
+readability_df = pd.DataFrame(readability_check)
+
+dataset_check_df = file_check_df.merge(readability_df, on="record")
+
+display(dataset_check_df)
+
+bad_records = dataset_check_df.loc[
+    ~(dataset_check_df["complete"] & dataset_check_df["readable"]),
+    "record"
+].tolist()
+
+print("\nBad records:", bad_records)
+
+if bad_records:
+    print("Re-downloading failed records...")
+    for rec in bad_records:
+        for ext in REQUIRED_EXTENSIONS:
+            path = DATA_DIR / f"{rec}{ext}"
+            path.unlink(missing_ok=True)
+        download_record(rec)
+
+    print("Re-run this cell once more to confirm repaired records.")
+    raise RuntimeError("Record repair attempted; repeat the integrity-check cell.")
+else:
+    assert len(dataset_check_df) == len(LEARNING_RECORDS)
+    assert dataset_check_df["complete"].all()
+    assert dataset_check_df["readable"].all()
+    assert (dataset_check_df["fs"] == 100).all()
+
+print("\nDataset integrity check PASSED.")
+
+// ==================== CELL 8 [markdown] ====================
+## Feature engineering
+
+The feature extraction follows the supplied notebooks: each apnea annotation is treated as a 60-second window, RR intervals are filtered to 0.30–2.00 seconds, and time-domain HR/HRV features are computed from the usable RR intervals.
+
+// ==================== CELL 9 [code] ====================
+# ============================================================
+# STEP 6 — MINUTE-LEVEL HR/HRV FEATURE EXTRACTION
+# ============================================================
+
+import json
+import warnings
+
+warnings.filterwarnings("ignore")
+
+FS_EXPECTED = 100
+MIN_RR = 0.30
+MAX_RR = 2.00
+MIN_VALID_RR = 3
+
+def extract_hrv_features(r_peaks, start_sample, end_sample, fs=100):
+    peaks = r_peaks[
+        (r_peaks >= start_sample) &
+        (r_peaks < end_sample)
+    ]
+
+    if len(peaks) < 4:
+        return None
+
+    rr_all = np.diff(peaks) / fs
+
+    if len(rr_all) == 0:
+        return None
+
+    rr = rr_all[
+        (rr_all >= MIN_RR) &
+        (rr_all <= MAX_RR)
+    ]
+
+    if len(rr) < MIN_VALID_RR:
+        return None
+
+    rr_valid_ratio = len(rr) / len(rr_all)
+    hr = 60.0 / rr
+    diff_rr = np.diff(rr)
+
+    if len(diff_rr) == 0:
+        return None
+
+    mean_hr = np.mean(hr)
+    median_hr = np.median(hr)
+    std_hr = np.std(hr)
+    min_hr = np.min(hr)
+    max_hr = np.max(hr)
+
+    mean_rr = np.mean(rr)
+    median_rr = np.median(rr)
+
+    sdnn = np.std(rr, ddof=1)
+    rmssd = np.sqrt(np.mean(diff_rr ** 2))
+    pnn50 = np.mean(np.abs(diff_rr) > 0.05) * 100.0
+
+    rr_iqr = np.percentile(rr, 75) - np.percentile(rr, 25)
+    rr_range = np.max(rr) - np.min(rr)
+    rr_std = np.std(rr)
+    rr_cv = rr_std / mean_rr if mean_rr > 0 else np.nan
+
+    rr_median = np.median(rr)
+    rr_mad = np.median(np.abs(rr - rr_median))
+
+    return {
+        "mean_hr": mean_hr,
+        "median_hr": median_hr,
+        "std_hr": std_hr,
+        "min_hr": min_hr,
+        "max_hr": max_hr,
+        "mean_rr": mean_rr,
+        "median_rr": median_rr,
+        "sdnn": sdnn,
+        "rmssd": rmssd,
+        "pnn50": pnn50,
+        "rr_iqr": rr_iqr,
+        "rr_range": rr_range,
+        "rr_std": rr_std,
+        "rr_cv": rr_cv,
+        "rr_mad": rr_mad,
+        "num_r_peaks": len(peaks),
+        "num_valid_rr": len(rr),
+        "rr_valid_ratio": rr_valid_ratio,
+    }
+
+all_features = []
+record_summaries = []
+
+for record_idx, record_name in enumerate(LEARNING_RECORDS, start=1):
+    record_path = str(DATA_DIR / record_name)
+
+    header = wfdb.rdheader(record_path)
+    fs = header.fs
+    total_samples = header.sig_len
+
+    qrs = wfdb.rdann(record_path, extension="qrs")
+    r_peaks = np.asarray(qrs.sample, dtype=np.int64)
+
+    apn = wfdb.rdann(record_path, extension="apn")
+    apnea_samples = np.asarray(apn.sample, dtype=np.int64)
+    apnea_symbols = np.asarray(apn.symbol)
+
+    successful_minutes = 0
+    failed_minutes = 0
+
+    for sample, label in zip(apnea_samples, apnea_symbols):
+        start_sample = int(sample)
+        end_sample = min(start_sample + 60 * int(fs), total_samples)
+
+        features = extract_hrv_features(
+            r_peaks=r_peaks,
+            start_sample=start_sample,
+            end_sample=end_sample,
+            fs=fs,
+        )
+
+        if features is None:
+            failed_minutes += 1
+            continue
+
+        minute_number = start_sample // int(fs * 60)
+
+        row = {
+            "record": record_name,
+            "minute": minute_number,
+            "start_sample": start_sample,
+            "end_sample": end_sample,
+            "label": label,
+        }
+        row.update(features)
+        all_features.append(row)
+        successful_minutes += 1
+
+    record_summaries.append({
+        "record": record_name,
+        "fs": fs,
+        "total_samples": total_samples,
+        "duration_hours": total_samples / fs / 3600,
+        "apnea_annotations": len(apnea_samples),
+        "successful_minutes": successful_minutes,
+        "failed_minutes": failed_minutes,
+        "qrs_peaks": len(r_peaks),
+        "status": "OK",
+    })
+
+    print(
+        f"[{record_idx:02d}/{len(LEARNING_RECORDS)}] "
+        f"{record_name}: usable={successful_minutes}, failed={failed_minutes}"
+    )
+
+features_df = pd.DataFrame(all_features)
+record_summary_df = pd.DataFrame(record_summaries)
+
+print("\nTotal usable minute samples:", len(features_df))
+print("Records:", features_df["record"].nunique())
+print("\nRaw label distribution:")
+print(features_df["label"].value_counts())
+
+// ==================== CELL 10 [code] ====================
+# ============================================================
+# STEP 7 — FEATURE DATA QUALITY CHECK
+# ============================================================
+
+print("=" * 80)
+print("FEATURE DATA QUALITY CHECK")
+print("=" * 80)
+
+print("Shape:", features_df.shape)
+print("Duplicate rows:", features_df.duplicated().sum())
+print(
+    "Duplicate record-minute pairs:",
+    features_df.duplicated(subset=["record", "minute"]).sum()
+)
+
+numeric_cols = features_df.select_dtypes(include=np.number).columns
+inf_count = np.isinf(features_df[numeric_cols].to_numpy()).sum()
+print("Infinite numeric values:", inf_count)
+
+print("\nMissing values:")
+display(features_df.isna().sum()[features_df.isna().sum() > 0])
+
+FEATURE_CSV = FEATURE_DIR / "apnea_ecg_hrv_features_best_combined.csv"
+SUMMARY_CSV = FEATURE_DIR / "record_summary_best_combined.csv"
+
+features_df.to_csv(FEATURE_CSV, index=False)
+record_summary_df.to_csv(SUMMARY_CSV, index=False)
+
+assert len(features_df) > 0
+assert features_df["record"].nunique() == len(LEARNING_RECORDS)
+assert features_df.duplicated(subset=["record", "minute"]).sum() == 0
+assert inf_count == 0
+
+print("\nSaved:")
+print(FEATURE_CSV)
+print(SUMMARY_CSV)
+
+// ==================== CELL 11 [code] ====================
+# ============================================================
+# STEP 8 — LABEL ENCODING + MODEL FEATURE SET
+# ============================================================
+
+df = features_df.copy()
+
+LABEL_MAPPING = {"N": 0, "A": 1}
+df["label"] = df["label"].map(LABEL_MAPPING)
+
+if df["label"].isna().any():
+    raise ValueError("Unexpected label found after N/A mapping.")
+
+df["label"] = df["label"].astype(int)
+
+MODEL_FEATURES = [
+    "mean_hr",
+    "median_hr",
+    "std_hr",
+    "min_hr",
+    "max_hr",
+    "mean_rr",
+    "median_rr",
+    "sdnn",
+    "rmssd",
+    "pnn50",
+    "rr_iqr",
+    "rr_range",
+    "rr_std",
+    "rr_cv",
+    "rr_mad",
+]
+
+print("Label mapping:", LABEL_MAPPING)
+print("Features:", len(MODEL_FEATURES))
+print(MODEL_FEATURES)
+
+missing = [f for f in MODEL_FEATURES if f not in df.columns]
+if missing:
+    raise ValueError(f"Missing modelling features: {missing}")
+
+print("\nClass distribution:")
+display(
+    pd.DataFrame({
+        "count": df["label"].value_counts().sort_index(),
+        "percentage": df["label"].value_counts(normalize=True).sort_index() * 100
+    })
+)
+
+// ==================== CELL 12 [code] ====================
+# ============================================================
+# STEP 9 — RECORD-LEVEL TRAIN / VALIDATION / TEST SPLIT
+#                  (c05 + c06 kept together)
+# ============================================================
+
+from sklearn.model_selection import train_test_split
+
+record_stats = (
+    df.groupby("record")
+      .agg(
+          total_minutes=("label", "size"),
+          apnea_minutes=("label", "sum")
+      )
+      .reset_index()
+)
+
+record_stats["apnea_ratio"] = (
+    record_stats["apnea_minutes"] / record_stats["total_minutes"]
+)
+
+record_stats["group"] = record_stats["record"]
+record_stats.loc[
+    record_stats["record"].isin(["c05", "c06"]),
+    "group"
+] = "c05_c06"
+
+group_stats = (
+    record_stats.groupby("group")
+                .agg(
+                    total_minutes=("total_minutes", "sum"),
+                    apnea_minutes=("apnea_minutes", "sum")
+                )
+                .reset_index()
+)
+
+group_stats["apnea_ratio"] = (
+    group_stats["apnea_minutes"] / group_stats["total_minutes"]
+)
+
+groups = group_stats["group"].to_numpy()
+
+# Stratify independent groups by apnea burden.
+group_stats["stratification_bin"] = pd.qcut(
+    group_stats["apnea_ratio"],
+    q=4,
+    labels=False,
+    duplicates="drop"
+)
+
+try:
+    train_groups, temp_groups = train_test_split(
+        groups,
+        test_size=0.30,
+        random_state=SEED,
+        stratify=group_stats["stratification_bin"]
+    )
+
+    temp_stats = group_stats[group_stats["group"].isin(temp_groups)].copy()
+
+    val_groups, test_groups = train_test_split(
+        temp_groups,
+        test_size=0.50,
+        random_state=SEED,
+        stratify=temp_stats["stratification_bin"]
+    )
+except ValueError:
+    # Deterministic fallback if stratification is impossible for a tiny bin.
+    rng = np.random.default_rng(SEED)
+    shuffled = groups.copy()
+    rng.shuffle(shuffled)
+    n_train = int(round(0.70 * len(shuffled)))
+    train_groups = shuffled[:n_train]
+    temp_groups = shuffled[n_train:]
+    midpoint = len(temp_groups) // 2
+    val_groups = temp_groups[:midpoint]
+    test_groups = temp_groups[midpoint:]
+
+train_groups = sorted(train_groups.tolist())
+val_groups = sorted(val_groups.tolist())
+test_groups = sorted(test_groups.tolist())
+
+def expand_groups(group_list):
+    expanded = []
+    for group in group_list:
+        if group == "c05_c06":
+            expanded.extend(["c05", "c06"])
+        else:
+            expanded.append(group)
+    return sorted(expanded)
+
+train_records = expand_groups(train_groups)
+val_records = expand_groups(val_groups)
+test_records = expand_groups(test_groups)
+
+train_df = df[df["record"].isin(train_records)].copy()
+val_df = df[df["record"].isin(val_records)].copy()
+test_df = df[df["record"].isin(test_records)].copy()
+
+train_set = set(train_records)
+val_set = set(val_records)
+test_set = set(test_records)
+
+assert train_set.isdisjoint(val_set)
+assert train_set.isdisjoint(test_set)
+assert val_set.isdisjoint(test_set)
+
+assert {"c05", "c06"} <= train_set     or {"c05", "c06"} <= val_set     or {"c05", "c06"} <= test_set
+
+assert train_set | val_set | test_set == set(LEARNING_RECORDS)
+
+split_summary = pd.DataFrame({
+    "split": ["Train", "Validation", "Test"],
+    "records": [len(train_records), len(val_records), len(test_records)],
+    "rows": [len(train_df), len(val_df), len(test_df)],
+    "normal": [
+        int((train_df["label"] == 0).sum()),
+        int((val_df["label"] == 0).sum()),
+        int((test_df["label"] == 0).sum()),
+    ],
+    "apnea": [
+        int((train_df["label"] == 1).sum()),
+        int((val_df["label"] == 1).sum()),
+        int((test_df["label"] == 1).sum()),
+    ],
+})
+
+split_summary["apnea_ratio"] = (
+    split_summary["apnea"] / split_summary["rows"]
+)
+
+split_summary["apnea_percentage"] = (
+    split_summary["apnea_ratio"] * 100
+)
+
+display(split_summary)
+
+print("\nTrain records:", train_records)
+print("Validation records:", val_records)
+print("Test records:", test_records)
+print("\nRecord-level leakage checks PASSED.")
+
+// ==================== CELL 13 [code] ====================
+# ============================================================
+# STEP 10 — TRAIN-ONLY IMPUTATION + STANDARDIZATION
+# ============================================================
+
+from sklearn.preprocessing import StandardScaler
+
+train_numeric = (
+    train_df[MODEL_FEATURES]
+    .apply(pd.to_numeric, errors="coerce")
+    .replace([np.inf, -np.inf], np.nan)
+)
+
+val_numeric = (
+    val_df[MODEL_FEATURES]
+    .apply(pd.to_numeric, errors="coerce")
+    .replace([np.inf, -np.inf], np.nan)
+)
+
+test_numeric = (
+    test_df[MODEL_FEATURES]
+    .apply(pd.to_numeric, errors="coerce")
+    .replace([np.inf, -np.inf], np.nan)
+)
+
+train_medians = train_numeric.median()
+
+if train_medians.isna().any():
+    raise ValueError(
+        "Some selected training features have no valid values: "
+        + str(train_medians[train_medians.isna()].index.tolist())
+    )
+
+train_numeric = train_numeric.fillna(train_medians)
+val_numeric = val_numeric.fillna(train_medians)
+test_numeric = test_numeric.fillna(train_medians)
+
+scaler_original = StandardScaler()
+
+X_train_original = scaler_original.fit_transform(train_numeric).astype(np.float32)
+X_val_original = scaler_original.transform(val_numeric).astype(np.float32)
+X_test_original = scaler_original.transform(test_numeric).astype(np.float32)
+
+y_train = train_df["label"].to_numpy(dtype=np.int64)
+y_val = val_df["label"].to_numpy(dtype=np.int64)
+y_test = test_df["label"].to_numpy(dtype=np.int64)
+
+assert np.isfinite(X_train_original).all()
+assert np.isfinite(X_val_original).all()
+assert np.isfinite(X_test_original).all()
+
+print("Train:", X_train_original.shape)
+print("Validation:", X_val_original.shape)
+print("Test:", X_test_original.shape)
+
+print("\nTrain class distribution:", dict(zip(*np.unique(y_train, return_counts=True))))
+print("Val class distribution  :", dict(zip(*np.unique(y_val, return_counts=True))))
+print("Test class distribution :", dict(zip(*np.unique(y_test, return_counts=True))))
+
+print("\nTRAIN-ONLY median imputation + scaling: PASSED.")
+
+// ==================== CELL 14 [code] ====================
+# ============================================================
+# STEP 11 — TRAIN-ONLY CORRELATION / REDUNDANCY ANALYSIS
+# ============================================================
+
+train_feature_df = train_numeric[MODEL_FEATURES].copy()
+
+corr_matrix = train_feature_df.corr(method="pearson")
+
+CORRELATION_THRESHOLD = 0.90
+high_corr_pairs = []
+
+for i in range(len(MODEL_FEATURES)):
+    for j in range(i + 1, len(MODEL_FEATURES)):
+        c = corr_matrix.iloc[i, j]
+        if abs(c) >= CORRELATION_THRESHOLD:
+            high_corr_pairs.append({
+                "feature_1": MODEL_FEATURES[i],
+                "feature_2": MODEL_FEATURES[j],
+                "correlation": c,
+                "absolute_correlation": abs(c),
+            })
+
+high_corr_pairs_df = pd.DataFrame(high_corr_pairs)
+
+target_corr = []
+target = train_df["label"].astype(float).to_numpy()
+
+for feature in MODEL_FEATURES:
+    x = train_feature_df[feature].to_numpy()
+    corr = np.corrcoef(x, target)[0, 1]
+    target_corr.append({
+        "feature": feature,
+        "target_correlation": corr,
+        "absolute_target_correlation": abs(corr),
+    })
+
+target_corr_df = (
+    pd.DataFrame(target_corr)
+      .sort_values("absolute_target_correlation", ascending=False)
+      .reset_index(drop=True)
+)
+
+mean_abs_corr = (
+    corr_matrix.abs()
+               .where(~np.eye(len(MODEL_FEATURES), dtype=bool))
+               .mean(axis=1)
+)
+
+redundancy_df = (
+    pd.DataFrame({
+        "feature": MODEL_FEATURES,
+        "mean_absolute_feature_correlation": mean_abs_corr.values
+    })
+    .sort_values("mean_absolute_feature_correlation", ascending=False)
+    .reset_index(drop=True)
+)
+
+print("Correlation matrix:")
+display(corr_matrix.round(3))
+
+print("Highly correlated pairs:")
+display(high_corr_pairs_df.round(4))
+
+print("Feature-target correlation:")
+display(target_corr_df.round(4))
+
+print("Redundancy summary:")
+display(redundancy_df.round(4))
+
+corr_matrix.to_csv(RESULT_DIR / "train_feature_correlation_matrix.csv")
+high_corr_pairs_df.to_csv(RESULT_DIR / "train_high_correlation_pairs.csv", index=False)
+target_corr_df.to_csv(RESULT_DIR / "train_feature_target_correlation.csv", index=False)
+
+// ==================== CELL 15 [code] ====================
+# ============================================================
+# STEP 12 — REDUNDANCY-REDUCED 10-FEATURE REPRESENTATION
+# ============================================================
+
+SELECTED_FEATURES = [
+    "mean_hr",
+    "std_hr",
+    "min_hr",
+    "max_hr",
+    "mean_rr",
+    "sdnn",
+    "rmssd",
+    "pnn50",
+    "rr_iqr",
+    "rr_range",
+]
+
+missing_selected = [f for f in SELECTED_FEATURES if f not in MODEL_FEATURES]
+if missing_selected:
+    raise ValueError(f"Selected features are not in MODEL_FEATURES: {missing_selected}")
+
+# Rebuild selected feature matrices from TRAIN-ONLY-imputed data.
+X_train_selected_df = train_numeric[SELECTED_FEATURES].copy()
+X_val_selected_df = val_numeric[SELECTED_FEATURES].copy()
+X_test_selected_df = test_numeric[SELECTED_FEATURES].copy()
+
+scaler_selected = StandardScaler()
+
+X_train_selected = scaler_selected.fit_transform(X_train_selected_df).astype(np.float32)
+X_val_selected = scaler_selected.transform(X_val_selected_df).astype(np.float32)
+X_test_selected = scaler_selected.transform(X_test_selected_df).astype(np.float32)
+
+assert X_train_selected.shape[1] == 10
+assert X_val_selected.shape[1] == 10
+assert X_test_selected.shape[1] == 10
+assert np.isfinite(X_train_selected).all()
+assert np.isfinite(X_val_selected).all()
+assert np.isfinite(X_test_selected).all()
+
+print("Selected features:")
+for i, feature in enumerate(SELECTED_FEATURES, 1):
+    print(f"{i:02d}. {feature}")
+
+print("\nShapes:")
+print("Train:", X_train_selected.shape)
+print("Val  :", X_val_selected.shape)
+print("Test :", X_test_selected.shape)
+
+// ==================== CELL 16 [code] ====================
+# ============================================================
+# STEP 13 — 4D PCA (TRAIN ONLY)
+# ============================================================
+
+from sklearn.decomposition import PCA
+
+PCA_LATENT_DIM = 4
+
+pca = PCA(
+    n_components=PCA_LATENT_DIM,
+    random_state=SEED
+)
+
+X_train_pca = pca.fit_transform(X_train_selected).astype(np.float32)
+X_val_pca = pca.transform(X_val_selected).astype(np.float32)
+X_test_pca = pca.transform(X_test_selected).astype(np.float32)
+
+explained_variance = pca.explained_variance_ratio_
+cumulative_variance = np.cumsum(explained_variance)
+
+pca_summary = pd.DataFrame({
+    "component": [f"PC{i+1}" for i in range(PCA_LATENT_DIM)],
+    "explained_variance_ratio": explained_variance,
+    "cumulative_explained_variance": cumulative_variance,
+})
+
+pca_loadings = pd.DataFrame(
+    pca.components_.T,
+    index=SELECTED_FEATURES,
+    columns=[f"PC{i+1}" for i in range(PCA_LATENT_DIM)],
+)
+
+print("PCA shapes:", X_train_pca.shape, X_val_pca.shape, X_test_pca.shape)
+display(pca_summary.round(4))
+print("Total variance retained:", round(cumulative_variance[-1] * 100, 2), "%")
+
+pca_summary.to_csv(RESULT_DIR / "pca_explained_variance.csv", index=False)
+pca_loadings.to_csv(RESULT_DIR / "pca_component_loadings.csv")
+
+// ==================== CELL 17 [code] ====================
+# ============================================================
+# STEP 14 — 4D AUTOENCODER (TRAIN ONLY)
+# ============================================================
+
+import time
+
+AE_INPUT_DIM = X_train_selected.shape[1]
+AE_LATENT_DIM = 4
+AE_HIDDEN_DIM = 8
+AE_BATCH_SIZE = 128
+AE_EPOCHS = 200
+AE_LEARNING_RATE = 1e-3
+AE_WEIGHT_DECAY = 1e-5
+AE_PATIENCE = 20
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+class HRVAutoencoder(nn.Module):
+    def __init__(self, input_dim=10, hidden_dim=8, latent_dim=4):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, latent_dim),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim),
+        )
+
+    def forward(self, x):
+        z = self.encoder(x)
+        reconstructed = self.decoder(z)
+        return reconstructed, z
+
+train_tensor = torch.tensor(X_train_selected, dtype=torch.float32)
+generator = torch.Generator()
+generator.manual_seed(SEED)
+
+train_loader = DataLoader(
+    TensorDataset(train_tensor),
+    batch_size=AE_BATCH_SIZE,
+    shuffle=True,
+    generator=generator,
+)
+
+ae = HRVAutoencoder(
+    input_dim=AE_INPUT_DIM,
+    hidden_dim=AE_HIDDEN_DIM,
+    latent_dim=AE_LATENT_DIM,
+).to(device)
+
+criterion = nn.MSELoss()
+
+optimizer = torch.optim.Adam(
+    ae.parameters(),
+    lr=AE_LEARNING_RATE,
+    weight_decay=AE_WEIGHT_DECAY,
+)
+
+best_loss = np.inf
+best_state = None
+patience_counter = 0
+loss_history = []
+
+start = time.perf_counter()
+
+for epoch in range(AE_EPOCHS):
+    ae.train()
+
+    epoch_loss = 0.0
+    n_seen = 0
+
+    for (batch_x,) in train_loader:
+        batch_x = batch_x.to(device)
+
+        optimizer.zero_grad()
+        reconstructed, _ = ae(batch_x)
+
+        loss = criterion(reconstructed, batch_x)
+        loss.backward()
+        optimizer.step()
+
+        batch_size = batch_x.size(0)
+        epoch_loss += loss.item() * batch_size
+        n_seen += batch_size
+
+    epoch_loss /= n_seen
+    loss_history.append(epoch_loss)
+
+    if epoch_loss < best_loss:
+        best_loss = epoch_loss
+        best_state = {
+            key: value.detach().cpu().clone()
+            for key, value in ae.state_dict().items()
+        }
+        patience_counter = 0
+    else:
+        patience_counter += 1
+
+    if epoch == 0 or (epoch + 1) % 20 == 0:
+        print(
+            f"Epoch {epoch + 1:3d}/{AE_EPOCHS} | "
+            f"train reconstruction MSE={epoch_loss:.7f}"
+        )
+
+    if patience_counter >= AE_PATIENCE:
+        print("Early stopping at epoch", epoch + 1)
+        break
+
+if best_state is None:
+    raise RuntimeError("Autoencoder training failed to produce a valid state.")
+
+ae.load_state_dict(best_state)
+ae.eval()
+
+print("\nDevice:", device)
+print("Best train reconstruction MSE:", best_loss)
+print("Epochs completed:", len(loss_history))
+print("Training time (sec):", round(time.perf_counter() - start, 2))
+
+// ==================== CELL 18 [code] ====================
+# ============================================================
+# STEP 15 — AE LATENT EXTRACTION + COLLAPSE CHECK
+# ============================================================
+
+def encode_dataset(model, X, device):
+    tensor_x = torch.tensor(
+        X,
+        dtype=torch.float32,
+        device=device
+    )
+    with torch.no_grad():
+        z = model.encoder(tensor_x)
+    return z.detach().cpu().numpy().astype(np.float32)
+
+X_train_ae = encode_dataset(ae, X_train_selected, device)
+X_val_ae = encode_dataset(ae, X_val_selected, device)
+X_test_ae = encode_dataset(ae, X_test_selected, device)
+
+assert X_train_ae.shape == (len(X_train_selected), AE_LATENT_DIM)
+assert X_val_ae.shape == (len(X_val_selected), AE_LATENT_DIM)
+assert X_test_ae.shape == (len(X_test_selected), AE_LATENT_DIM)
+
+assert np.isfinite(X_train_ae).all()
+assert np.isfinite(X_val_ae).all()
+assert np.isfinite(X_test_ae).all()
+
+latent_std = X_train_ae.std(axis=0)
+
+print("Latent shapes:", X_train_ae.shape, X_val_ae.shape, X_test_ae.shape)
+print("\nLatent training standard deviations:")
+for i, s in enumerate(latent_std, 1):
+    print(f"AE_latent_{i}: {s:.8f}")
+
+if np.any(latent_std < 1e-6):
+    raise ValueError("At least one autoencoder latent dimension collapsed.")
+
+latent_cols = [f"AE_latent_{i+1}" for i in range(AE_LATENT_DIM)]
+
+pd.DataFrame(X_train_ae, columns=latent_cols).assign(label=y_train).to_csv(
+    FEATURE_DIR / "ae_latent_train.csv", index=False
+)
+pd.DataFrame(X_val_ae, columns=latent_cols).assign(label=y_val).to_csv(
+    FEATURE_DIR / "ae_latent_validation.csv", index=False
+)
+pd.DataFrame(X_test_ae, columns=latent_cols).assign(label=y_test).to_csv(
+    FEATURE_DIR / "ae_latent_test.csv", index=False
+)
+
+print("\nAE latent extraction PASSED.")
+
+// ==================== CELL 19 [code] ====================
+# ============================================================
+# STEP 16 — TRAIN-ONLY AE LATENT SCALING
+# ============================================================
+
+ae_latent_scaler = StandardScaler()
+
+X_train_ae_scaled = ae_latent_scaler.fit_transform(X_train_ae).astype(np.float32)
+X_val_ae_scaled = ae_latent_scaler.transform(X_val_ae).astype(np.float32)
+X_test_ae_scaled = ae_latent_scaler.transform(X_test_ae).astype(np.float32)
+
+assert np.isfinite(X_train_ae_scaled).all()
+assert np.isfinite(X_val_ae_scaled).all()
+assert np.isfinite(X_test_ae_scaled).all()
+
+print("Scaled latent shapes:")
+print("Train:", X_train_ae_scaled.shape)
+print("Val  :", X_val_ae_scaled.shape)
+print("Test :", X_test_ae_scaled.shape)
+
+print("\nTraining scaled means:")
+print(np.round(X_train_ae_scaled.mean(axis=0), 6))
+
+print("\nTraining scaled std:")
+print(np.round(X_train_ae_scaled.std(axis=0), 6))
+
+pd.DataFrame(
+    X_train_ae_scaled, columns=latent_cols
+).assign(label=y_train).to_csv(
+    FEATURE_DIR / "ae_latent_train_scaled.csv", index=False
+)
+pd.DataFrame(
+    X_val_ae_scaled, columns=latent_cols
+).assign(label=y_val).to_csv(
+    FEATURE_DIR / "ae_latent_validation_scaled.csv", index=False
+)
+pd.DataFrame(
+    X_test_ae_scaled, columns=latent_cols
+).assign(label=y_test).to_csv(
+    FEATURE_DIR / "ae_latent_test_scaled.csv", index=False
+)
+
+// ==================== CELL 20 [code] ====================
+# ============================================================
+# STEP 17 — PCA vs AE REPRESENTATION DIAGNOSTICS
+# ============================================================
+
+from sklearn.metrics import silhouette_score
+
+ae_val_tensor = torch.tensor(
+    X_val_selected,
+    dtype=torch.float32,
+    device=device
+)
+
+with torch.no_grad():
+    ae_reconstructed_val, _ = ae(ae_val_tensor)
+    ae_val_mse = criterion(
+        ae_reconstructed_val,
+        ae_val_tensor
+    ).item()
+
+pca_silhouette = silhouette_score(X_train_pca, y_train)
+ae_silhouette = silhouette_score(X_train_ae, y_train)
+
+representation_comparison = pd.DataFrame({
+    "Method": ["PCA", "Autoencoder"],
+    "Original_Dimensions": [10, 10],
+    "Reduced_Dimensions": [4, 4],
+    "Variance_Retained": [float(cumulative_variance[-1]), np.nan],
+    "Validation_Reconstruction_MSE": [np.nan, ae_val_mse],
+    "Training_Silhouette": [pca_silhouette, ae_silhouette],
+})
+
+display(representation_comparison.round(4))
+representation_comparison.to_csv(
+    RESULT_DIR / "pca_vs_autoencoder_comparison.csv",
+    index=False
+)
+
+// ==================== CELL 21 [code] ====================
+# ============================================================
+# STEP 18 — GENERIC CLASSIFIER EVALUATION HELPERS
+# ============================================================
+
+from sklearn.svm import SVC
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    average_precision_score,
+    confusion_matrix,
+    roc_curve,
+    brier_score_loss,
+    log_loss,
+)
+
+def evaluate_scores(y_true, scores, split_name, threshold=0.0, model_name="model", representation=""):
+    y_true = np.asarray(y_true).astype(int)
+    scores = np.asarray(scores).ravel()
+    y_pred = (scores >= threshold).astype(int)
+
+    tn, fp, fn, tp = confusion_matrix(
+        y_true, y_pred, labels=[0, 1]
+    ).ravel()
+
+    return {
+        "model": model_name,
+        "representation": representation,
+        "split": split_name,
+        "threshold": float(threshold),
+        "accuracy": accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, zero_division=0),
+        "sensitivity": recall_score(y_true, y_pred, zero_division=0),
+        "specificity": tn / (tn + fp) if (tn + fp) else 0.0,
+        "f1": f1_score(y_true, y_pred, zero_division=0),
+        "roc_auc": roc_auc_score(y_true, scores),
+        "pr_auc": average_precision_score(y_true, scores),
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
+    }
+
+print("Evaluation helpers created.")
+
+// ==================== CELL 22 [markdown] ====================
+## Classical baselines
+
+The final notebook reports both full-data classical baselines and a matched 1,000-sample classical comparison for the quantum experiment. This keeps the quantum comparison fair while still retaining the stronger full-data classical reference.
+
+// ==================== CELL 23 [code] ====================
+# ============================================================
+# STEP 19 — CLASSICAL RBF-SVM BASELINES
+# ============================================================
+
+classical_models = {}
+
+def fit_and_score_rbf(
+    Xtr, ytr, Xv, yv, Xte, yte,
+    C=1.0, gamma="scale", class_weight="balanced",
+    representation="",
+    model_name="RBF-SVM",
+):
+    model = SVC(
+        kernel="rbf",
+        C=C,
+        gamma=gamma,
+        class_weight=class_weight,
+        probability=False,
+        random_state=SEED,
+    )
+    model.fit(Xtr, ytr)
+
+    val_score = model.decision_function(Xv)
+    test_score = model.decision_function(Xte)
+
+    val_row = evaluate_scores(
+        yv, val_score, "validation",
+        threshold=0.0,
+        model_name=model_name,
+        representation=representation
+    )
+    test_row = evaluate_scores(
+        yte, test_score, "test",
+        threshold=0.0,
+        model_name=model_name,
+        representation=representation
+    )
+
+    return model, val_row, test_row, val_score, test_score
+
+# 10D HRV baseline
+svm_10d, val_10d, test_10d, _, _ = fit_and_score_rbf(
+    X_train_selected, y_train,
+    X_val_selected, y_val,
+    X_test_selected, y_test,
+    C=1.0, gamma="scale", class_weight="balanced",
+    representation="10D_HRV",
+    model_name="RBF-SVM"
+)
+classical_models["10D_HRV"] = svm_10d
+
+# PCA 4D
+svm_pca, val_pca, test_pca, _, _ = fit_and_score_rbf(
+    X_train_pca, y_train,
+    X_val_pca, y_val,
+    X_test_pca, y_test,
+    C=1.0, gamma="scale", class_weight="balanced",
+    representation="4D_PCA",
+    model_name="RBF-SVM"
+)
+classical_models["4D_PCA"] = svm_pca
+
+# AE 4D
+svm_ae, val_ae, test_ae, ae_val_scores_fixed, ae_test_scores_fixed = fit_and_score_rbf(
+    X_train_ae_scaled, y_train,
+    X_val_ae_scaled, y_val,
+    X_test_ae_scaled, y_test,
+    C=1.0, gamma="scale", class_weight="balanced",
+    representation="4D_Autoencoder",
+    model_name="RBF-SVM"
+)
+classical_models["4D_AE"] = svm_ae
+
+classical_results = pd.DataFrame([
+    val_10d, test_10d,
+    val_pca, test_pca,
+    val_ae, test_ae,
+])
+
+display(
+    classical_results[
+        [
+            "model", "representation", "split",
+            "accuracy", "precision", "sensitivity",
+            "specificity", "f1", "roc_auc", "pr_auc",
+            "tn", "fp", "fn", "tp"
+        ]
+    ].round(4)
+)
+
+classical_results.to_csv(
+    RESULT_DIR / "classical_baselines_results.csv",
+    index=False
+)
+
+// ==================== CELL 24 [code] ====================
+# ============================================================
+# STEP 20 — AE-SVM VALIDATION HYPERPARAMETER TUNING
+# ============================================================
+
+C_VALUES = [0.1, 1.0, 10.0]
+GAMMA_VALUES = ["scale", 0.01, 0.1, 1.0]
+
+tuning_rows = []
+
+for C in C_VALUES:
+    for gamma in GAMMA_VALUES:
+        model = SVC(
+            kernel="rbf",
+            C=C,
+            gamma=gamma,
+            class_weight="balanced",
+            probability=False,
+            random_state=SEED,
+        )
+        model.fit(X_train_ae_scaled, y_train)
+
+        val_score = model.decision_function(X_val_ae_scaled)
+        row = evaluate_scores(
+            y_val,
+            val_score,
+            "validation",
+            threshold=0.0,
+            model_name="AE-RBF-SVM-Tuned",
+            representation="4D_Autoencoder"
+        )
+        row.update({"C": C, "gamma": gamma})
+        tuning_rows.append(row)
+
+ae_tuning_df = pd.DataFrame(tuning_rows).sort_values(
+    "roc_auc", ascending=False
+).reset_index(drop=True)
+
+display(
+    ae_tuning_df[
+        ["C", "gamma", "accuracy", "sensitivity",
+         "specificity", "f1", "roc_auc", "pr_auc"]
+    ].round(4)
+)
+
+best_ae_C = float(ae_tuning_df.iloc[0]["C"])
+best_ae_gamma = ae_tuning_df.iloc[0]["gamma"]
+
+print("\nSelected AE-SVM configuration from VALIDATION:")
+print("C:", best_ae_C)
+print("gamma:", best_ae_gamma)
+print("Validation ROC-AUC:", round(float(ae_tuning_df.iloc[0]["roc_auc"]), 4))
+
+// ==================== CELL 25 [code] ====================
+# ============================================================
+# STEP 21 — FINAL AE-SVM USING VALIDATION-SELECTED PARAMETERS
+# ============================================================
+
+ae_svm_tuned = SVC(
+    kernel="rbf",
+    C=best_ae_C,
+    gamma=best_ae_gamma,
+    class_weight="balanced",
+    probability=False,
+    random_state=SEED,
+)
+
+ae_svm_tuned.fit(X_train_ae_scaled, y_train)
+
+ae_tuned_val_scores = ae_svm_tuned.decision_function(X_val_ae_scaled)
+ae_tuned_test_scores = ae_svm_tuned.decision_function(X_test_ae_scaled)
+
+ae_tuned_val_row = evaluate_scores(
+    y_val,
+    ae_tuned_val_scores,
+    "validation",
+    threshold=0.0,
+    model_name="AE-RBF-SVM-Tuned",
+    representation="4D_Autoencoder"
+)
+
+ae_tuned_test_row = evaluate_scores(
+    y_test,
+    ae_tuned_test_scores,
+    "test",
+    threshold=0.0,
+    model_name="AE-RBF-SVM-Tuned",
+    representation="4D_Autoencoder"
+)
+
+ae_tuned_results = pd.DataFrame([ae_tuned_val_row, ae_tuned_test_row])
+
+display(
+    ae_tuned_results[
+        ["split", "accuracy", "precision", "sensitivity",
+         "specificity", "f1", "roc_auc", "pr_auc",
+         "tn", "fp", "fn", "tp"]
+    ].round(4)
+)
+
+ae_tuned_results.to_csv(
+    RESULT_DIR / "ae_rbf_svm_tuned_results.csv",
+    index=False
+)
+
+// ==================== CELL 26 [code] ====================
+# ============================================================
+# STEP 22 — MATCHED 1,000-SAMPLE CLASSICAL BASELINE
+#                    (FOR FAIR QSVM COMPARISON)
+# ============================================================
+
+def record_balanced_indices(y, records, n_per_class=500, seed=SEED):
+    y = np.asarray(y)
+    records = np.asarray(records)
+
+    rng = np.random.default_rng(seed)
+    selected = []
+
+    for cls in [0, 1]:
+        cls_records = np.unique(records[y == cls])
+        cls_records = cls_records.copy()
+        rng.shuffle(cls_records)
+
+        pools = {
+            rec: rng.permutation(
+                np.where((y == cls) & (records == rec))[0]
+            )
+            for rec in cls_records
+        }
+
+        chosen = []
+
+        while len(chosen) < n_per_class and any(p.size for p in pools.values()):
+            for rec in cls_records:
+                if pools[rec].size and len(chosen) < n_per_class:
+                    chosen.append(int(pools[rec][0]))
+                    pools[rec] = pools[rec][1:]
+
+        if len(chosen) < n_per_class:
+            raise ValueError(
+                f"Not enough class-{cls} samples for requested balanced subset."
+            )
+
+        selected.extend(chosen)
+
+    selected = np.asarray(selected, dtype=int)
+    rng.shuffle(selected)
+
+    return selected
+
+train_sample_records = train_df["record"].to_numpy()
+val_sample_records = val_df["record"].to_numpy()
+test_sample_records = test_df["record"].to_numpy()
+
+QSVM_TRAIN_PER_CLASS = 500
+
+qs_train_idx = record_balanced_indices(
+    y_train,
+    train_sample_records,
+    n_per_class=QSVM_TRAIN_PER_CLASS,
+    seed=SEED
+)
+
+X_q_train = X_train_ae_scaled[qs_train_idx]
+y_q_train = y_train[qs_train_idx]
+records_q_train = train_sample_records[qs_train_idx]
+
+assert X_q_train.shape == (1000, 4)
+assert np.sum(y_q_train == 0) == 500
+assert np.sum(y_q_train == 1) == 500
+
+matched_classical_scaler = StandardScaler().fit(X_train_ae[qs_train_idx])
+
+X_matched_train = matched_classical_scaler.transform(
+    X_train_ae[qs_train_idx]
+).astype(np.float32)
+
+X_matched_val = matched_classical_scaler.transform(
+    X_val_ae
+).astype(np.float32)
+
+X_matched_test = matched_classical_scaler.transform(
+    X_test_ae
+).astype(np.float32)
+
+matched_c_values = [0.1, 1.0, 10.0, 100.0]
+matched_tune_rows = []
+
+for C in matched_c_values:
+    m = SVC(
+        kernel="rbf",
+        C=C,
+        gamma="scale",
+        probability=False,
+        random_state=SEED,
+    )
+    m.fit(X_matched_train, y_q_train)
+
+    val_score = m.decision_function(X_matched_val)
+    row = evaluate_scores(
+        y_val,
+        val_score,
+        "validation",
+        model_name="Matched-AE-RBF-SVM",
+        representation="4D_Autoencoder_1000_balanced"
+    )
+    row["C"] = C
+    matched_tune_rows.append(row)
+
+matched_tuning_df = pd.DataFrame(matched_tune_rows).sort_values(
+    "roc_auc", ascending=False
+).reset_index(drop=True)
+
+best_matched_C = float(matched_tuning_df.iloc[0]["C"])
+
+matched_classical = SVC(
+    kernel="rbf",
+    C=best_matched_C,
+    gamma="scale",
+    probability=False,
+    random_state=SEED
+)
+matched_classical.fit(X_matched_train, y_q_train)
+
+matched_val_scores = matched_classical.decision_function(X_matched_val)
+matched_test_scores = matched_classical.decision_function(X_matched_test)
+
+matched_val_row = evaluate_scores(
+    y_val,
+    matched_val_scores,
+    "validation",
+    model_name="Matched-AE-RBF-SVM",
+    representation="4D_Autoencoder_1000_balanced"
+)
+
+matched_test_row = evaluate_scores(
+    y_test,
+    matched_test_scores,
+    "test",
+    model_name="Matched-AE-RBF-SVM",
+    representation="4D_Autoencoder_1000_balanced"
+)
+
+matched_results = pd.DataFrame([matched_val_row, matched_test_row])
+
+print("Matched training shape:", X_matched_train.shape)
+print("Selected C:", best_matched_C)
+
+display(
+    matched_results[
+        ["split", "accuracy", "precision", "sensitivity",
+         "specificity", "f1", "roc_auc", "pr_auc"]
+    ].round(4)
+)
+
+// ==================== CELL 27 [markdown] ====================
+## Quantum pipeline
+
+Two complementary ideas from the supplied notebooks are retained:
+
+1. **Qiskit FidelityQuantumKernel sanity check** on a tiny matrix, so the quantum environment and kernel object are verified before the larger experiment.
+2. **Manual Statevector fidelity kernel** for the actual 1,000-sample experiment, which avoids repeated high-level kernel evaluation overhead and makes the matrix orientation explicit for scikit-learn's `precomputed` SVM.
+
+The autoencoder latent vectors are additionally mapped to `[0, π]` using a scaler fitted on TRAIN only. This addresses the scaling problem identified in the supplied comparison while preserving the train-only preprocessing discipline.
+
+// ==================== CELL 28 [code] ====================
+# ============================================================
+# STEP 23 — QUANTUM ENVIRONMENT SANITY CHECK
+# ============================================================
+
+from qiskit.circuit.library import zz_feature_map
+from qiskit.quantum_info import Statevector
+from qiskit_machine_learning.kernels import FidelityQuantumKernel
+
+N_QUBITS = 4
+
+feature_map = zz_feature_map(
+    feature_dimension=N_QUBITS,
+    reps=2,
+    entanglement="linear"
+)
+
+quantum_kernel = FidelityQuantumKernel(
+    feature_map=feature_map
+)
+
+assert feature_map.num_qubits == 4
+assert X_q_train.shape[1] == 4
+
+X_kernel_small = X_q_train[:10]
+
+K_small = np.asarray(
+    quantum_kernel.evaluate(x_vec=X_kernel_small)
+)
+
+print("Feature-map qubits:", feature_map.num_qubits)
+print("Feature-map depth :", feature_map.depth())
+print("Small kernel shape:", K_small.shape)
+print("Min:", K_small.min())
+print("Max:", K_small.max())
+print("Mean:", K_small.mean())
+print("Symmetric:", np.allclose(K_small, K_small.T, atol=1e-8))
+print("Diagonal ≈ 1:", np.allclose(np.diag(K_small), 1.0, atol=1e-6))
+print("Finite:", np.isfinite(K_small).all())
+
+# PSD sanity check on tiny matrix.
+eigvals = np.linalg.eigvalsh((K_small + K_small.T) / 2)
+print("Minimum eigenvalue:", eigvals.min())
+
+assert np.isfinite(K_small).all()
+assert np.allclose(K_small, K_small.T, atol=1e-8)
+assert np.allclose(np.diag(K_small), 1.0, atol=1e-6)
+assert eigvals.min() > -1e-7
+
+print("\nQuantum kernel sanity test PASSED.")
+
+// ==================== CELL 29 [code] ====================
+# ============================================================
+# STEP 24 — QUANTUM ANGLE SCALING TO [0, π]
+#                  FIT ON TRAIN ONLY
+# ============================================================
+
+from sklearn.preprocessing import MinMaxScaler
+
+quantum_angle_scaler = MinMaxScaler(
+    feature_range=(0.0, np.pi)
+)
+
+quantum_angle_scaler.fit(X_train_ae_scaled)
+
+def quantum_scale(X):
+    scaled = quantum_angle_scaler.transform(X)
+    return np.clip(scaled, 0.0, np.pi).astype(np.float32)
+
+X_quantum_train_all = quantum_scale(X_train_ae_scaled)
+X_quantum_val = quantum_scale(X_val_ae_scaled)
+X_quantum_test = quantum_scale(X_test_ae_scaled)
+
+X_q_train = X_quantum_train_all[qs_train_idx]
+
+assert np.isfinite(X_q_train).all()
+assert np.isfinite(X_quantum_val).all()
+assert np.isfinite(X_quantum_test).all()
+
+print("Quantum training subset shape:", X_q_train.shape)
+print("Train angle range:", X_q_train.min(), "to", X_q_train.max())
+print("Validation angle range:", X_quantum_val.min(), "to", X_quantum_val.max())
+print("Test angle range:", X_quantum_test.min(), "to", X_quantum_test.max())
+print("\nQuantum angle scaling fitted on TRAIN only.")
+
+// ==================== CELL 30 [code] ====================
+# ============================================================
+# STEP 25 — FAST STATEVECTOR QUANTUM KERNEL
+# ============================================================
+
+def statevectors_from_features(X, fmap, desc="Quantum states"):
+    X = np.asarray(X)
+    dim = 2 ** fmap.num_qubits
+
+    out = np.empty(
+        (len(X), dim),
+        dtype=np.complex128
+    )
+
+    for i, x in enumerate(tqdm(X, total=len(X), desc=desc)):
+        circuit = fmap.assign_parameters(x)
+        out[i] = Statevector.from_instruction(circuit).data
+
+    return out
+
+def fidelity_kernel_from_states(A, B):
+    return np.abs(A.conj() @ B.T) ** 2
+
+start = time.perf_counter()
+
+train_states = statevectors_from_features(
+    X_q_train,
+    feature_map,
+    desc="Training quantum states"
+)
+
+state_train_time = time.perf_counter() - start
+
+start = time.perf_counter()
+
+K_q_train = fidelity_kernel_from_states(
+    train_states,
+    train_states
+)
+
+kernel_train_time = time.perf_counter() - start
+
+print("Training states:", train_states.shape)
+print("K_train:", K_q_train.shape)
+print("State time (sec):", round(state_train_time, 2))
+print("Kernel time (sec):", round(kernel_train_time, 2))
+
+assert K_q_train.shape == (1000, 1000)
+assert np.isfinite(K_q_train).all()
+assert np.allclose(K_q_train, K_q_train.T, atol=1e-8)
+assert np.allclose(np.diag(K_q_train), 1.0, atol=1e-6)
+
+// ==================== CELL 31 [code] ====================
+# ============================================================
+# STEP 26 — QUANTUM KERNEL CLASS SEPARATION
+# ============================================================
+
+y_q_train_np = np.asarray(y_q_train)
+
+normal_idx = np.where(y_q_train_np == 0)[0]
+apnea_idx = np.where(y_q_train_np == 1)[0]
+
+off_diag = ~np.eye(len(y_q_train_np), dtype=bool)
+
+same_mask = (
+    y_q_train_np[:, None] == y_q_train_np[None, :]
+) & off_diag
+
+cross_mask = (
+    y_q_train_np[:, None] != y_q_train_np[None, :]
+)
+
+same_mean = K_q_train[same_mask].mean()
+cross_mean = K_q_train[cross_mask].mean()
+
+same_median = np.median(K_q_train[same_mask])
+cross_median = np.median(K_q_train[cross_mask])
+
+print("Normal samples:", len(normal_idx))
+print("Apnea samples :", len(apnea_idx))
+print("\nSame-class mean similarity :", round(float(same_mean), 6))
+print("Cross-class mean similarity:", round(float(cross_mean), 6))
+print("Kernel gap                  :", round(float(same_mean - cross_mean), 6))
+
+print("\nSame-class median similarity :", round(float(same_median), 6))
+print("Cross-class median similarity:", round(float(cross_median), 6))
+
+// ==================== CELL 32 [code] ====================
+# ============================================================
+# STEP 27 — TRAIN ↔ FULL VALIDATION QUANTUM KERNEL
+# ============================================================
+
+start = time.perf_counter()
+
+val_states = statevectors_from_features(
+    X_quantum_val,
+    feature_map,
+    desc="Validation quantum states"
+)
+
+state_val_time = time.perf_counter() - start
+
+start = time.perf_counter()
+
+# This orientation is intentional:
+# scipy/sklearn precomputed SVC expects
+#   fit:   (n_train, n_train)
+#   score: (n_validation, n_train)
+K_q_val_svc = fidelity_kernel_from_states(
+    val_states,
+    train_states
+)
+
+kernel_val_time = time.perf_counter() - start
+
+assert K_q_val_svc.shape == (len(X_quantum_val), 1000)
+assert np.isfinite(K_q_val_svc).all()
+
+print("Validation states:", val_states.shape)
+print("K_val_svc:", K_q_val_svc.shape)
+print("State time (sec):", round(state_val_time, 2))
+print("Kernel time (sec):", round(kernel_val_time, 2))
+
+// ==================== CELL 33 [code] ====================
+# ============================================================
+# STEP 28 — QSVM C TUNING ON VALIDATION SET
+# ============================================================
+
+QSVM_C_VALUES = [0.1, 1.0, 10.0, 100.0]
+
+qsvm_tuning_rows = []
+
+for C in QSVM_C_VALUES:
+    model = SVC(
+        kernel="precomputed",
+        C=C,
+        probability=False,
+        random_state=SEED,
+    )
+    t0 = time.perf_counter()
+    model.fit(K_q_train, y_q_train)
+    fit_time = time.perf_counter() - t0
+
+    val_score = model.decision_function(K_q_val_svc)
+
+    row = evaluate_scores(
+        y_val,
+        val_score,
+        "validation",
+        threshold=0.0,
+        model_name="QSVM",
+        representation="4D_Autoencoder_1000_balanced"
+    )
+    row["C"] = C
+    row["fit_time_sec"] = fit_time
+    qsvm_tuning_rows.append(row)
+
+qsvm_tuning_df = pd.DataFrame(qsvm_tuning_rows).sort_values(
+    "roc_auc",
+    ascending=False
+).reset_index(drop=True)
+
+display(
+    qsvm_tuning_df[
+        ["C", "roc_auc", "pr_auc", "accuracy",
+         "sensitivity", "specificity", "f1", "fit_time_sec"]
+    ].round(4)
+)
+
+BEST_QSVM_C = float(qsvm_tuning_df.iloc[0]["C"])
+
+print("\nSelected QSVM C:", BEST_QSVM_C)
+print("Validation ROC-AUC:", round(float(qsvm_tuning_df.iloc[0]["roc_auc"]), 4))
+
+qsvm_tuning_df.to_csv(
+    RESULT_DIR / "qsvm_C_tuning_results.csv",
+    index=False
+)
+
+// ==================== CELL 34 [code] ====================
+# ============================================================
+# STEP 29 — FINAL QSVM TRAINING + TEST KERNEL
+# ============================================================
+
+final_qsvm = SVC(
+    kernel="precomputed",
+    C=BEST_QSVM_C,
+    probability=False,
+    random_state=SEED
+)
+
+qsvm_fit_start = time.perf_counter()
+final_qsvm.fit(K_q_train, y_q_train)
+qsvm_fit_time = time.perf_counter() - qsvm_fit_start
+
+start = time.perf_counter()
+
+test_states = statevectors_from_features(
+    X_quantum_test,
+    feature_map,
+    desc="Test quantum states"
+)
+
+state_test_time = time.perf_counter() - start
+
+start = time.perf_counter()
+
+K_q_test_svc = fidelity_kernel_from_states(
+    test_states,
+    train_states
+)
+
+kernel_test_time = time.perf_counter() - start
+
+assert K_q_test_svc.shape == (len(y_test), 1000)
+assert np.isfinite(K_q_test_svc).all()
+
+qsvm_val_scores = final_qsvm.decision_function(K_q_val_svc)
+qsvm_test_scores = final_qsvm.decision_function(K_q_test_svc)
+
+qsvm_default_val = evaluate_scores(
+    y_val,
+    qsvm_val_scores,
+    "validation",
+    threshold=0.0,
+    model_name="QSVM",
+    representation="4D_Autoencoder_1000_balanced"
+)
+
+qsvm_default_test = evaluate_scores(
+    y_test,
+    qsvm_test_scores,
+    "test",
+    threshold=0.0,
+    model_name="QSVM",
+    representation="4D_Autoencoder_1000_balanced"
+)
+
+print("QSVM fit time (sec):", round(qsvm_fit_time, 3))
+print("Test state time (sec):", round(state_test_time, 2))
+print("Test kernel time (sec):", round(kernel_test_time, 2))
+
+display(
+    pd.DataFrame([qsvm_default_val, qsvm_default_test])[
+        ["split", "accuracy", "precision", "sensitivity",
+         "specificity", "f1", "roc_auc", "pr_auc",
+         "tn", "fp", "fn", "tp"]
+    ].round(4)
+)
+
+// ==================== CELL 35 [markdown] ====================
+## QSVM operating threshold and calibration
+
+The supplied notebooks hard-coded a threshold (`-0.5341`) after inspecting one saved run. The combined notebook removes that brittle dependency. The threshold is now calculated directly from the current validation scores.
+
+The test labels are used only after the model, hyperparameters, threshold, and calibration mapping have already been determined from non-test data.
+
+// ==================== CELL 36 [code] ====================
+# ============================================================
+# STEP 30 — VALIDATION THRESHOLD SEARCH
+# ============================================================
+
+threshold_rows = []
+
+# Dense threshold grid across the validation score distribution.
+val_min = float(np.min(qsvm_val_scores))
+val_max = float(np.max(qsvm_val_scores))
+
+threshold_grid = np.linspace(
+    val_min,
+    val_max,
+    201
+)
+
+for threshold in threshold_grid:
+    row = evaluate_scores(
+        y_val,
+        qsvm_val_scores,
+        "validation",
+        threshold=float(threshold),
+        model_name="QSVM",
+        representation="4D_Autoencoder_1000_balanced"
+    )
+    row["youden_j"] = row["sensitivity"] + row["specificity"] - 1.0
+    threshold_rows.append(row)
+
+qsvm_threshold_df = pd.DataFrame(threshold_rows)
+
+youden_idx = qsvm_threshold_df["youden_j"].idxmax()
+f1_idx = qsvm_threshold_df["f1"].idxmax()
+
+QSVM_THRESHOLD_YOUDEN = float(
+    qsvm_threshold_df.loc[youden_idx, "threshold"]
+)
+QSVM_THRESHOLD_F1 = float(
+    qsvm_threshold_df.loc[f1_idx, "threshold"]
+)
+
+print("Validation-selected Youden threshold:", QSVM_THRESHOLD_YOUDEN)
+print("Validation-selected F1 threshold   :", QSVM_THRESHOLD_F1)
+
+print("\nYouden operating point:")
+display(
+    qsvm_threshold_df.loc[
+        [youden_idx],
+        ["threshold", "accuracy", "precision", "sensitivity",
+         "specificity", "f1", "youden_j"]
+    ].round(4)
+)
+
+print("\nF1 operating point:")
+display(
+    qsvm_threshold_df.loc[
+        [f1_idx],
+        ["threshold", "accuracy", "precision", "sensitivity",
+         "specificity", "f1"]
+    ].round(4)
+)
+
+qsvm_threshold_df.to_csv(
+    RESULT_DIR / "qsvm_validation_threshold_analysis.csv",
+    index=False
+)
+
+// ==================== CELL 37 [code] ====================
+# ============================================================
+# STEP 31 — FINAL QSVM TEST AT VALIDATION-DERIVED THRESHOLD
+# ============================================================
+
+qsvm_youden_test = evaluate_scores(
+    y_test,
+    qsvm_test_scores,
+    "test",
+    threshold=QSVM_THRESHOLD_YOUDEN,
+    model_name="QSVM",
+    representation="4D_Autoencoder_1000_balanced"
+)
+
+qsvm_f1_test = evaluate_scores(
+    y_test,
+    qsvm_test_scores,
+    "test",
+    threshold=QSVM_THRESHOLD_F1,
+    model_name="QSVM",
+    representation="4D_Autoencoder_1000_balanced"
+)
+
+qsvm_operating_results = pd.DataFrame([
+    qsvm_default_test,
+    qsvm_youden_test,
+    qsvm_f1_test,
+])
+
+display(
+    qsvm_operating_results[
+        ["threshold", "accuracy", "precision", "sensitivity",
+         "specificity", "f1", "roc_auc", "pr_auc",
+         "tn", "fp", "fn", "tp"]
+    ].round(4)
+)
+
+qsvm_operating_results.to_csv(
+    RESULT_DIR / "qsvm_test_operating_points.csv",
+    index=False
+)
+
+// ==================== CELL 38 [code] ====================
+# ============================================================
+# STEP 32 — SIGMOID CALIBRATION (VALIDATION FIT ONLY)
+# ============================================================
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import calibration_curve
+
+calibrator = LogisticRegression(
+    C=1.0,
+    solver="lbfgs",
+    random_state=SEED
+)
+
+calibrator.fit(
+    qsvm_val_scores.reshape(-1, 1),
+    y_val
+)
+
+qsvm_val_calibrated_probability = calibrator.predict_proba(
+    qsvm_val_scores.reshape(-1, 1)
+)[:, 1]
+
+qsvm_test_calibrated_probability = calibrator.predict_proba(
+    qsvm_test_scores.reshape(-1, 1)
+)[:, 1]
+
+calibration_metrics = {
+    "brier_score_test": brier_score_loss(
+        y_test,
+        qsvm_test_calibrated_probability
+    ),
+    "log_loss_test": log_loss(
+        y_test,
+        qsvm_test_calibrated_probability
+    ),
+    "roc_auc_test": roc_auc_score(
+        y_test,
+        qsvm_test_calibrated_probability
+    ),
+    "observed_test_prevalence": float(np.mean(y_test)),
+    "mean_test_predicted_probability": float(
+        np.mean(qsvm_test_calibrated_probability)
+    ),
+}
+
+print("Calibration was fitted using VALIDATION scores only.")
+print("\nTest calibration metrics:")
+for key, value in calibration_metrics.items():
+    print(f"{key}: {value:.6f}")
+
+prob_bins = pd.DataFrame({
+    "probability": qsvm_test_calibrated_probability,
+    "actual": y_test
+})
+
+prob_bins["bin"] = pd.cut(
+    prob_bins["probability"],
+    bins=np.linspace(0, 1, 11),
+    include_lowest=True
+)
+
+calibration_summary = (
+    prob_bins.groupby("bin", observed=False)
+             .agg(
+                 samples=("actual", "size"),
+                 mean_predicted_probability=("probability", "mean"),
+                 observed_apnea_rate=("actual", "mean")
+             )
+             .reset_index()
+)
+
+display(calibration_summary.round(4))
+
+pd.DataFrame([calibration_metrics]).to_csv(
+    RESULT_DIR / "qsvm_calibration_metrics.csv",
+    index=False
+)
+
+calibration_summary.to_csv(
+    RESULT_DIR / "qsvm_calibration_bins.csv",
+    index=False
+)
+
+// ==================== CELL 39 [code] ====================
+# ============================================================
+# STEP 33 — GLOBAL MODEL COMPARISON TABLE
+# ============================================================
+
+comparison_rows = [
+    val_10d,
+    test_10d,
+    val_pca,
+    test_pca,
+    val_ae,
+    test_ae,
+    ae_tuned_val_row,
+    ae_tuned_test_row,
+    matched_val_row,
+    matched_test_row,
+    qsvm_default_val,
+    qsvm_default_test,
+    qsvm_youden_test,
+    qsvm_f1_test,
+]
+
+comparison_df = pd.DataFrame(comparison_rows)
+
+# Add configuration fields where relevant.
+comparison_df["configuration"] = ""
+comparison_df.loc[
+    comparison_df["model"].eq("AE-RBF-SVM-Tuned"),
+    "configuration"
+] = f"C={best_ae_C}, gamma={best_ae_gamma}"
+
+comparison_df.loc[
+    comparison_df["model"].eq("Matched-AE-RBF-SVM"),
+    "configuration"
+] = f"C={best_matched_C}, gamma=scale"
+
+comparison_df.loc[
+    comparison_df["model"].eq("QSVM"),
+    "configuration"
+] = f"C={BEST_QSVM_C}"
+
+comparison_df.to_csv(
+    RESULT_DIR / "model_comparison_all_results.csv",
+    index=False
+)
+
+display(
+    comparison_df[
+        [
+            "model", "representation", "split",
+            "threshold", "configuration",
+            "accuracy", "precision", "sensitivity",
+            "specificity", "f1", "roc_auc", "pr_auc",
+            "tn", "fp", "fn", "tp"
+        ]
+    ].round(4)
+)
+
+// ==================== CELL 40 [markdown] ====================
+## Explainability
+
+The explanation method is deliberately simple and reproducible: perturb one selected HR/HRV feature at a time and measure the absolute change in the final QSVM decision score. This is a sensitivity analysis, not a causal claim.
+
+// ==================== CELL 41 [code] ====================
+# ============================================================
+# STEP 34 — SINGLE-SAMPLE QSVM PREDICTION + EXPLAINABILITY
+# ============================================================
+
+def predict_sleep_apnea_qsvm(
+    raw_selected_features,
+    feature_map,
+    autoencoder,
+    original_scaler,
+    latent_scaler,
+    quantum_scaler,
+    trained_qsvm,
+    train_quantum_states
+):
+    raw = np.asarray(raw_selected_features, dtype=np.float64).reshape(1, -1)
+
+    if raw.shape[1] != len(SELECTED_FEATURES):
+        raise ValueError(
+            f"Expected {len(SELECTED_FEATURES)} selected features, "
+            f"got {raw.shape[1]}."
+        )
+
+    raw_df = pd.DataFrame(raw, columns=SELECTED_FEATURES)
+
+    # Fill using medians learned from TRAIN only.
+    raw_df = raw_df.fillna(
+        pd.Series(
+            train_medians[SELECTED_FEATURES].to_dict()
+        )
+    )
+
+    scaled_original = original_scaler.transform(raw_df).astype(np.float32)
+
+    tensor_x = torch.tensor(
+        scaled_original,
+        dtype=torch.float32,
+        device=device
+    )
+
+    autoencoder.eval()
+    with torch.no_grad():
+        latent = autoencoder.encoder(tensor_x).cpu().numpy().astype(np.float32)
+
+    latent_scaled = latent_scaler.transform(latent).astype(np.float32)
+    quantum_x = quantum_scaler.transform(latent_scaled)
+    quantum_x = np.clip(quantum_x, 0.0, np.pi).astype(np.float32)
+
+    state = Statevector.from_instruction(
+        feature_map.assign_parameters(quantum_x[0])
+    ).data.reshape(1, -1)
+
+    kernel_row = fidelity_kernel_from_states(
+        state,
+        train_quantum_states
+    )
+
+    decision_score = float(
+        trained_qsvm.decision_function(kernel_row).ravel()[0]
+    )
+
+    calibrated_probability = float(
+        calibrator.predict_proba(
+            np.array([[decision_score]])
+        )[0, 1]
+    )
+
+    prediction = int(decision_score >= QSVM_THRESHOLD_YOUDEN)
+
+    return {
+        "prediction": prediction,
+        "decision_score": decision_score,
+        "calibrated_probability": calibrated_probability,
+        "latent_representation": latent[0],
+        "quantum_features": quantum_x[0],
+    }
+
+# Use the first held-out TEST sample as a demonstration only.
+DEMO_TEST_INDEX = 0
+
+demo_raw = X_test_selected_df.iloc[DEMO_TEST_INDEX].to_numpy(dtype=float)
+demo_result = predict_sleep_apnea_qsvm(
+    raw_selected_features=demo_raw,
+    feature_map=feature_map,
+    autoencoder=ae,
+    original_scaler=scaler_selected,
+    latent_scaler=ae_latent_scaler,
+    quantum_scaler=quantum_angle_scaler,
+    trained_qsvm=final_qsvm,
+    train_quantum_states=train_states,
+)
+
+demo_record = test_df.iloc[DEMO_TEST_INDEX]["record"]
+demo_minute = test_df.iloc[DEMO_TEST_INDEX]["minute"]
+demo_actual = int(y_test[DEMO_TEST_INDEX])
+
+print("Demo record:", demo_record)
+print("Demo minute:", demo_minute)
+print("Actual label:", demo_actual)
+print("Predicted label:", demo_result["prediction"])
+print("Decision score:", round(demo_result["decision_score"], 6))
+print(
+    "Calibrated apnea probability:",
+    round(demo_result["calibrated_probability"], 6)
+)
+print("Latent:", np.round(demo_result["latent_representation"], 4))
+print("Quantum features:", np.round(demo_result["quantum_features"], 4))
+
+// ==================== CELL 42 [code] ====================
+# ============================================================
+# STEP 35 — PERTURBATION-BASED QSVM EXPLAINABILITY
+# ============================================================
+
+def qsvm_decision_from_raw_features(raw_features):
+    result = predict_sleep_apnea_qsvm(
+        raw_selected_features=raw_features,
+        feature_map=feature_map,
+        autoencoder=ae,
+        original_scaler=scaler_selected,
+        latent_scaler=ae_latent_scaler,
+        quantum_scaler=quantum_angle_scaler,
+        trained_qsvm=final_qsvm,
+        train_quantum_states=train_states,
+    )
+    return result["decision_score"]
+
+baseline_raw = demo_raw.copy()
+baseline_score = qsvm_decision_from_raw_features(baseline_raw)
+
+feature_scale = scaler_selected.scale_
+
+explanation_rows = []
+
+for i, feature in enumerate(SELECTED_FEATURES):
+    perturbed = baseline_raw.copy()
+
+    delta = 0.10 * feature_scale[i]
+    if delta == 0:
+        delta = 0.10
+
+    perturbed[i] += delta
+
+    perturbed_score = qsvm_decision_from_raw_features(perturbed)
+    influence = perturbed_score - baseline_score
+
+    explanation_rows.append({
+        "feature": feature,
+        "perturbation": delta,
+        "baseline_score": baseline_score,
+        "perturbed_score": perturbed_score,
+        "influence": influence,
+        "absolute_influence": abs(influence),
+    })
+
+explainability_df = (
+    pd.DataFrame(explanation_rows)
+      .sort_values("absolute_influence", ascending=False)
+      .reset_index(drop=True)
+)
+
+display(explainability_df.round(6))
+
+explainability_df.to_csv(
+    RESULT_DIR / "qsvm_feature_perturbation_explainability.csv",
+    index=False
+)
+
+// ==================== CELL 43 [code] ====================
+# ============================================================
+# STEP 36 — EXPLAINABILITY + PERFORMANCE VISUALIZATIONS
+# ============================================================
+
+from sklearn.metrics import ConfusionMatrixDisplay
+
+plt.figure(figsize=(8, 4))
+plt.plot(loss_history)
+plt.xlabel("Epoch")
+plt.ylabel("Training reconstruction MSE")
+plt.title("Autoencoder Training Loss")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(8, 5))
+plot_df = explainability_df.head(8).sort_values(
+    "absolute_influence",
+    ascending=True
+)
+plt.barh(
+    plot_df["feature"],
+    plot_df["absolute_influence"]
+)
+plt.xlabel("Absolute change in QSVM decision score")
+plt.ylabel("Feature")
+plt.title("QSVM Perturbation Explainability")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(7, 5))
+ConfusionMatrixDisplay.from_predictions(
+    y_test,
+    (qsvm_test_scores >= QSVM_THRESHOLD_YOUDEN).astype(int),
+    display_labels=["Normal", "Apnea"],
+)
+plt.title("QSVM Test Confusion Matrix — Validation-Derived Youden Threshold")
+plt.tight_layout()
+plt.show()
+
+# Calibration curve
+prob_true, prob_pred = calibration_curve(
+    y_test,
+    qsvm_test_calibrated_probability,
+    n_bins=10,
+    strategy="uniform"
+)
+
+plt.figure(figsize=(6, 6))
+plt.plot(prob_pred, prob_true, marker="o")
+plt.plot([0, 1], [0, 1], linestyle="--")
+plt.xlabel("Mean predicted probability")
+plt.ylabel("Observed apnea rate")
+plt.title("QSVM Calibration Curve")
+plt.tight_layout()
+plt.show()
+
+// ==================== CELL 44 [code] ====================
+# ============================================================
+# STEP 37 — FINAL PIPELINE OBJECT / LEAKAGE SANITY CHECK
+# ============================================================
+
+required_names = [
+    "df",
+    "train_df",
+    "val_df",
+    "test_df",
+    "X_train_selected",
+    "X_val_selected",
+    "X_test_selected",
+    "X_train_ae",
+    "X_val_ae",
+    "X_test_ae",
+    "X_train_ae_scaled",
+    "X_val_ae_scaled",
+    "X_test_ae_scaled",
+    "X_q_train",
+    "y_q_train",
+    "K_q_train",
+    "K_q_val_svc",
+    "K_q_test_svc",
+    "final_qsvm",
+    "calibrator",
+    "feature_map",
+    "train_states",
+    "scaler_selected",
+    "ae_latent_scaler",
+    "quantum_angle_scaler",
+]
+
+missing_names = [name for name in required_names if name not in globals()]
+
+assert not missing_names, f"Missing pipeline objects: {missing_names}"
+
+assert len(train_df) == len(y_train)
+assert len(val_df) == len(y_val)
+assert len(test_df) == len(y_test)
+
+assert not (set(train_records) & set(val_records))
+assert not (set(train_records) & set(test_records))
+assert not (set(val_records) & set(test_records))
+
+assert np.isfinite(K_q_train).all()
+assert np.isfinite(K_q_val_svc).all()
+assert np.isfinite(K_q_test_svc).all()
+
+print("All required objects exist.")
+print("No record-level split overlap.")
+print("Quantum kernel matrices are finite.")
+print("Pipeline sanity checks PASSED.")
+
+// ==================== CELL 45 [code] ====================
+# ============================================================
+# STEP 38 — SAVE TRAINED MODELS / SCALERS / METADATA
+# ============================================================
+
+joblib.dump(scaler_selected, MODEL_DIR / "selected_feature_scaler.joblib")
+joblib.dump(ae_latent_scaler, MODEL_DIR / "ae_latent_scaler.joblib")
+joblib.dump(quantum_angle_scaler, MODEL_DIR / "quantum_angle_scaler.joblib")
+
+joblib.dump(pca, MODEL_DIR / "pca_4d.joblib")
+joblib.dump(svm_10d, MODEL_DIR / "svm_10d.joblib")
+joblib.dump(svm_pca, MODEL_DIR / "svm_pca_4d.joblib")
+joblib.dump(svm_ae, MODEL_DIR / "svm_ae_4d_fixed.joblib")
+joblib.dump(ae_svm_tuned, MODEL_DIR / "svm_ae_4d_tuned.joblib")
+joblib.dump(final_qsvm, MODEL_DIR / "qsvm_precomputed.joblib")
+joblib.dump(feature_map, MODEL_DIR / "qsvm_feature_map.joblib")
+joblib.dump(calibrator, MODEL_DIR / "qsvm_sigmoid_calibrator.joblib")
+
+torch.save(ae.state_dict(), MODEL_DIR / "hrv_autoencoder_state_dict.pt")
+
+np.save(MODEL_DIR / "qsvm_train_indices.npy", qs_train_idx)
+np.save(MODEL_DIR / "qsvm_train_states.npy", train_states)
+
+metadata = {
+    "seed": SEED,
+    "selected_features": SELECTED_FEATURES,
+    "ae_latent_dim": AE_LATENT_DIM,
+    "pca_latent_dim": PCA_LATENT_DIM,
+    "qsvm_train_per_class": QSVM_TRAIN_PER_CLASS,
+    "qsvm_selected_C": BEST_QSVM_C,
+    "qsvm_youden_threshold": QSVM_THRESHOLD_YOUDEN,
+    "qsvm_f1_threshold": QSVM_THRESHOLD_F1,
+    "train_records": train_records,
+    "validation_records": val_records,
+    "test_records": test_records,
+}
+
+with open(MODEL_DIR / "pipeline_metadata.json", "w", encoding="utf-8") as f:
+    json.dump(metadata, f, indent=2)
+
+print("Model artifacts saved to:", MODEL_DIR)
+
+// ==================== CELL 46 [code] ====================
+# ============================================================
+# STEP 39 — FINAL RUN SUMMARY
+# ============================================================
+
+# Validation-based operating configuration
+primary_validation = {
+    "AE-SVM tuned C": best_ae_C,
+    "AE-SVM tuned gamma": best_ae_gamma,
+    "QSVM C": BEST_QSVM_C,
+    "QSVM threshold (Youden)": QSVM_THRESHOLD_YOUDEN,
+}
+
+print("=" * 80)
+print("FINAL RUN SUMMARY")
+print("=" * 80)
+
+print("\nDataset:")
+print(split_summary.to_string(index=False))
+
+print("\nRepresentation:")
+print(representation_comparison.round(4).to_string(index=False))
+
+print("\nSelected validation configuration:")
+for key, value in primary_validation.items():
+    print(f"{key}: {value}")
+
+print("\nGenerated result files:")
+for path in sorted(RESULT_DIR.glob("*.csv")):
+    print(" -", path.name)
+
+print("\nGenerated model files:")
+for path in sorted(MODEL_DIR.iterdir()):
+    print(" -", path.name)
+
+print("\n" + "=" * 80)
+print("PIPELINE COMPLETE")
+print("=" * 80)
+
